@@ -1,0 +1,69 @@
+# Runs after the Vrixel SDLC deploys a commit. Every stage checks the deployed agent (up, MCP
+# servers reachable, auth enforced). In dev the evals also run against the real model through
+# the dev LLM gateway: that is the agent's integration suite. Results are posted on the deployed
+# commit as "integration / report", "e2e / report" and "smoke / report".
+#
+# Live evals need the `dev` environment's EVALS_GATEWAY_URL variable and EVALS_GATEWAY_KEY secret
+# (a gateway key for this agent's eval caller, with its own budget). If the gateway is only
+# reachable inside the cluster, run this job on a self-hosted runner there.
+name: post-deploy
+
+on:
+  repository_dispatch:
+    types: [vrixel-deployed]
+  workflow_dispatch:
+    inputs:
+      stage: { description: "dev, staging or production", required: true, type: choice, options: [dev, staging, production] }
+      base_url: { description: "URL of the deployed agent", required: true }
+      sha: { description: "Deployed commit", required: true }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-deploy-${{ github.event.client_payload.stage || inputs.stage }}-${{ github.event.client_payload.sha || inputs.sha }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify ${{ github.event.client_payload.stage || inputs.stage }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event.client_payload.stage || inputs.stage }}
+    permissions:
+      contents: read
+      statuses: write
+    env:
+      STAGE: ${{ github.event.client_payload.stage || inputs.stage }}
+      BASE_URL: ${{ github.event.client_payload.base_url || inputs.base_url }}
+      REPORT_SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REPORT_SHA }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+      - name: Run the stage's suite
+        id: run
+        env:
+          AGENT_GATEWAY_URL: ${{ vars.EVALS_GATEWAY_URL }}
+          AGENT_GATEWAY_KEY: ${{ secrets.EVALS_GATEWAY_KEY }}
+        run: |
+          case "$STAGE" in
+            dev) echo "suite=integration" >> "$GITHUB_OUTPUT" ;;
+            staging) echo "suite=e2e" >> "$GITHUB_OUTPUT" ;;
+            production) echo "suite=smoke" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unknown stage $STAGE" >&2; exit 2 ;;
+          esac
+          status=0
+          uv run python -m evals.smoke --base-url "$BASE_URL" --junit reports/deployed-smoke.xml || status=1
+          if [ "$STAGE" = dev ]; then
+            uv run python -m evals.run --live --junit reports/deployed-evals.xml || status=1
+          fi
+          exit $status
+      - name: Report results
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/report.py --context "${{ steps.run.outputs.suite }} / report" --junit 'reports/deployed-*.xml'

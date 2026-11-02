@@ -1,0 +1,1 @@
+"""Vrixel workflow agent template."""

@@ -1,0 +1,71 @@
+[
+ {
+  "id": "msg",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-5",
+  "content": [
+   {
+    "type": "tool_use",
+    "id": "tu_1",
+    "name": "care__find_patient",
+    "input": {
+     "name": "Ana Lopez",
+     "date_of_birth": "1984-03-02"
+    }
+   }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "cache_read_input_tokens": 800
+  }
+ },
+ {
+  "id": "msg",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-5",
+  "content": [
+   {
+    "type": "text",
+    "text": "Proposing a routine dermatology consult task."
+   },
+   {
+    "type": "tool_use",
+    "id": "tu_2",
+    "name": "care__create_task",
+    "input": {
+     "patient_id": "p-102",
+     "title": "Dermatology consult (routine referral)",
+     "priority": "routine"
+    }
+   }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "cache_read_input_tokens": 800
+  }
+ },
+ {
+  "id": "msg",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-5",
+  "content": [
+   {
+    "type": "text",
+    "text": "The reviewer rejected the task, so it was not created: dermatology referrals go to the external scheduling desk."
+   }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "cache_read_input_tokens": 800
+  }
+ }
+]

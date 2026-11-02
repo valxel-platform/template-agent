@@ -1,0 +1,43 @@
+[
+ {
+  "id": "msg",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-5",
+  "content": [
+   {
+    "type": "tool_use",
+    "id": "tu_1",
+    "name": "care__find_patient",
+    "input": {
+     "name": "Sam Reed",
+     "date_of_birth": "1990-07-11"
+    }
+   }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "cache_read_input_tokens": 800
+  }
+ },
+ {
+  "id": "msg",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-5",
+  "content": [
+   {
+    "type": "text",
+    "text": "I could not find a patient named Sam Reed born 1990-07-11, so I did not create a task. Please confirm the patient's details or register them first."
+   }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+   "input_tokens": 900,
+   "output_tokens": 120,
+   "cache_read_input_tokens": 800
+  }
+ }
+]

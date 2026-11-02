@@ -1,0 +1,104 @@
+# template-agent
+
+The Vrixel template for a **workflow agent**: a durable LangGraph agent that works on a task
+using the product's MCP tools, with every change approved by a person and every model call going
+through the product's LLM gateway.
+
+The example agent turns a referral into a care-team task. Replace the prompt, the tools it may
+use and the eval cases with your own; keep the structure.
+
+```
+event / POST /runs
+      │
+   think ──── read-only tools run at once ───┐
+      │  proposes changes (write tools)      │
+      v                                      │
+   review ── a person approves or rejects ── act ── runs approved changes (idempotent) ──> think
+      │
+   think ── no more tools ──> done (the model's summary is the result)
+   think ── step limit ──> a person resumes or stops the run
+```
+
+## What the template decides for you
+
+| Concern | How |
+| --- | --- |
+| Models | Anthropic SDK pointed at the product's LLM gateway (`AGENT_GATEWAY_URL`). The gateway enforces the data class (PHI only to BAA providers), redacts, meters spend and holds the provider keys; the agent holds only a gateway key. System prompt and tools are prompt-cached. |
+| Tools | The product's MCP servers (`AGENT_MCP_SERVERS`), filtered by an allowlist (`AGENT_ALLOWED_TOOLS`). Tools annotated `readOnlyHint` run immediately; everything else, including unannotated tools, needs approval. |
+| Human approval | A LangGraph interrupt. Reviewers can approve all, approve some (`approved_ids`) or reject with a note the model sees. The reviewer's identity is in the trace. |
+| Safe retries | Each approved call carries `idempotency_key = <run>:<tool_use_id>`; `POST /runs` takes an `Idempotency-Key`; events are keyed by their id. |
+| Durability | Runs are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
+| Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. |
+| Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. |
+| Audit | Every model turn (with token counts), tool call, refusal and decision is in the run's trace. |
+| Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
+| Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
+
+## API
+
+```
+POST /runs                  {"task": {...}}           Idempotency-Key header   (agent:run)
+POST /events                {"id", "type", "text"}                             (agent:run)
+GET  /runs/{id}             status, result, waiting_for, trace                 (agent:run)
+POST /runs/{id}/decision    {"decision": "approve"|"reject"|"resume"|"stop",
+                             "approved_ids": [...], "note": "..."}             (agent:review)
+```
+
+Status is `working`, `awaiting_review`, `needs_attention`, `done`, `stopped` or `failed`.
+
+## Evals
+
+Agents change behavior when the model, the prompt or a tool changes, so they are tested on what
+they do, not only on code paths.
+
+- `evals/cases.jsonl`: tasks with expectations: tools that must or must not be called, their
+  arguments, status, text the result must contain, identifiers it must not repeat, a step budget.
+- `evals/world.py`: an in-memory, seeded stand-in for the MCP servers.
+- `evals/cassettes/`: recorded model responses.
+
+| When | Command | Model | Status |
+| --- | --- | --- | --- |
+| Every PR (required check) | `uv run python -m evals.run` | recorded | `evals / report` |
+| After deploy to dev | `uv run python -m evals.run --live` | real, through the dev gateway | `integration / report` |
+| Re-record after a prompt change | `uv run python -m evals.run --live --record` | real | |
+
+The pipeline's quality policy reads these statuses like any other suite.
+
+## Develop
+
+```
+uv sync
+uv run pytest -m 'not evals'       # unit tests with coverage
+uv run python -m evals.run         # recorded evals
+uv run ruff check . && uv run ruff format --check . && uv run mypy
+```
+
+Run locally against a gateway:
+
+```
+export AGENT_GATEWAY_URL=http://localhost:8080 AGENT_GATEWAY_KEY=...
+export AGENT_MCP_SERVERS='[{"name":"care","url":"http://localhost:9000/mcp","token_env":"CARE_TOKEN"}]'
+export AGENT_OIDC_ISSUER=... AGENT_OIDC_AUDIENCE=... AGENT_OIDC_JWKS_URL=...
+uv run agent
+```
+
+## Configuration
+
+| Variable | Default | |
+| --- | --- | --- |
+| `AGENT_NAME` | `intake-agent` | Sent to the gateway as `x-vrixel-agent` for budgets and usage |
+| `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_KEY` | | The product's LLM gateway and this agent's key |
+| `AGENT_MODEL`, `AGENT_MAX_TOKENS` | `claude-sonnet-5-5`, `2048` | The gateway's model allowlist applies |
+| `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, token_env}` |
+| `AGENT_ALLOWED_TOOLS` | `["*"]` | fnmatch patterns on `<server>__<tool>`; list tools explicitly in production |
+| `AGENT_MAX_STEPS` | `8` | |
+| `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only) |
+| `AGENT_OIDC_ISSUER`, `AGENT_OIDC_AUDIENCE`, `AGENT_OIDC_JWKS_URL` | | Required |
+| `AGENT_RUN_SCOPE`, `AGENT_REVIEW_SCOPE` | `agent:run`, `agent:review` | |
+
+## Delivery
+
+CI (`ci.yml`) runs `unit` and `evals`, dependency review and an image build; CodeQL comes from
+the repo's default setup. These are the required checks the Vrixel SDLC sets on repos with the
+`agent` role. The SDLC deploys through OpenChoreo and then sends `vrixel-deployed`, which runs
+`post-deploy.yml`: the smoke check at every stage, and live evals in dev.
