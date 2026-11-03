@@ -33,5 +33,10 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    # Feature flags: the product's Flipt over OFREP. Unset, every flag reads as its default (off).
+    flags_url: str = ""
+    flags_environment: str = ""  # Flipt environment, e.g. production (header x-flipt-environment)
+    flags_namespace: str = ""  # the product's Flipt namespace, e.g. emr
+    flags_token: str = ""  # a Flipt client token, if the product's Flipt requires authentication
     run_scope: str = "agent:run"
     review_scope: str = "agent:review"

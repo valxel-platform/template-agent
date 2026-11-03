@@ -25,6 +25,7 @@ from langgraph.types import Command
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
+from . import flags
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
 from .model import GatewayModel, Model
 from .settings import Settings
@@ -181,6 +182,7 @@ def create_app(
 ) -> FastAPI:
     """`synchronous` makes requests wait for the run to pause or finish (tests and evals)."""
     settings = settings or Settings()
+    flags.configure(settings)
     model = model or GatewayModel(
         base_url=settings.gateway_url,
         api_key=settings.gateway_key,
