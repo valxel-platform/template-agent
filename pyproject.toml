@@ -56,4 +56,4 @@ markers = ["evals: agent evaluations (run in the evals job)"]
 addopts = "-q --cov=agent --cov-report=term --cov-report=xml --junitxml=reports/junit.xml"
 
 [tool.coverage.report]
-fail_under = 75
+fail_under = 90
