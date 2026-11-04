@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    # Audit trail (audit.py): "kafka" in deployed environments, "log" locally.
+    product: str = ""  # e.g. emr
+    environment: str = ""  # e.g. production
+    data_class: str = "general"  # general | phi | payments
+    audit_sink: str = "log"
+    audit_kafka_bootstrap: str = ""
+    audit_topic: str = "audit.v1"
+    audit_kafka_config: dict[str, str] = Field(default_factory=dict)  # security.protocol, sasl.* ...
+    audit_required: bool = True  # a decision or change whose record can't be published fails
     # Feature flags: the product's Flipt over OFREP. Unset, every flag reads as its default (off).
     flags_url: str = ""
     flags_environment: str = ""  # Flipt environment, e.g. production (header x-flipt-environment)

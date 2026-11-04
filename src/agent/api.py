@@ -22,10 +22,13 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from langgraph.types import Command
+from opentelemetry import context as otel_context
+from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import flags
+from . import flags, telemetry
+from .audit import Auditor, AuditUnavailable, make_sink
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
 from .model import GatewayModel, Model
 from .settings import Settings
@@ -83,8 +86,10 @@ def _scopes(claims: dict[str, Any]) -> set[str]:
 class Runner:
     """Runs the graph in the background; one run executes at a time per id."""
 
-    def __init__(self, graph: Any, max_steps: int, workers: int = 8) -> None:
+    def __init__(self, graph: Any, max_steps: int, workers: int = 8, name: str = "agent") -> None:
         self.graph = graph
+        self.name = name
+        self.problems: dict[str, str] = {}  # run id -> why its last step didn't complete
         self.max_steps = max_steps
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="run")
         self.active: set[str] = set()
@@ -104,12 +109,35 @@ class Runner:
     def exists(self, run_id: str) -> bool:
         return bool(self.graph.get_state(self.config(run_id)).values)
 
-    def _execute(self, run_id: str, payload: Any) -> None:
+    def _in_context(self, ctx: Any, run_id: str, payload: Any) -> None:
+        """Runs on a worker thread, inside the trace of the request that started or resumed it."""
+        token = otel_context.attach(ctx)
         try:
-            self.graph.invoke(payload, self.config(run_id))
+            self._execute(run_id, payload)
+        finally:
+            otel_context.detach(token)
+
+    def _execute(self, run_id: str, payload: Any) -> None:
+        tracer = trace.get_tracer("agent")
+        try:
+            with tracer.start_as_current_span(
+                f"invoke_agent {self.name}", kind=trace.SpanKind.INTERNAL
+            ) as span:
+                span.set_attribute("gen_ai.operation.name", "invoke_agent")
+                span.set_attribute("gen_ai.agent.name", self.name)
+                span.set_attribute("gen_ai.conversation.id", run_id)
+                self.graph.invoke(payload, self.config(run_id))
+            self.problems.pop(run_id, None)
             self.finished.labels(self.view(run_id)["status"]).inc()
+        except AuditUnavailable:
+            self.errors.inc()
+            self.problems[run_id] = (
+                "The audit trail is unavailable, so the last step was not done. Try again."
+            )
+            log.exception("run %s stopped: audit trail unavailable", run_id)
         except Exception:
             self.errors.inc()
+            self.problems[run_id] = "The last step failed; see the service logs."
             log.exception("run %s failed", run_id)
         finally:
             with self.lock:
@@ -120,7 +148,7 @@ class Runner:
             if run_id in self.active:
                 raise HTTPException(409, "This run is already working; try again when it pauses.")
             self.active.add(run_id)
-        fut = self.pool.submit(self._execute, run_id, payload)
+        fut = self.pool.submit(self._in_context, otel_context.get_current(), run_id, payload)
         if wait:
             fut.result()
 
@@ -147,8 +175,26 @@ class Runner:
             "result": v.get("result", ""),
             "waiting_for": waiting[0] if waiting else None,
             "steps": v.get("steps", 0),
+            "problem": self.problems.get(run_id, ""),
             "trace": v.get("trace", []),
         }
+
+
+def make_auditor(settings: Settings) -> Auditor:
+    sink = make_sink(
+        settings.audit_sink,
+        bootstrap=settings.audit_kafka_bootstrap,
+        topic=settings.audit_topic,
+        config=dict(settings.audit_kafka_config),
+    )
+    return Auditor(
+        sink,
+        service=settings.name,
+        product=settings.product,
+        environment=settings.environment,
+        data_class=settings.data_class,
+        required=settings.audit_required,
+    )
 
 
 def make_checkpointer(settings: Settings) -> Any:
@@ -179,6 +225,7 @@ def create_app(
     verifier: Verifier | None = None,
     checkpointer: Any = None,
     synchronous: bool = False,
+    auditor: Auditor | None = None,
 ) -> FastAPI:
     """`synchronous` makes requests wait for the run to pause or finish (tests and evals)."""
     settings = settings or Settings()
@@ -197,9 +244,12 @@ def create_app(
         tools=tools,
         product=settings.name,
         checkpointer=checkpointer or make_checkpointer(settings),
+        auditor=auditor or make_auditor(settings),
+        agent=settings.name,
     )
-    runner = Runner(graph, settings.max_steps)
+    runner = Runner(graph, settings.max_steps, name=settings.name)
     app = FastAPI(title=settings.name, version="0.1.0")
+    telemetry.setup(settings.name, app=app)
     app.state.runner = runner
 
     def caller(scope: str) -> Callable[..., dict[str, Any]]:
@@ -287,5 +337,6 @@ def create_app(
 def main() -> None:
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO)
-    uvicorn.run(create_app(), host="0.0.0.0", port=8080)  # noqa: S104  (inside the container)
+    settings = Settings()
+    telemetry.setup_logging(settings.name)
+    uvicorn.run(create_app(settings), host="0.0.0.0", port=8080, log_config=None)  # noqa: S104  (inside the container)

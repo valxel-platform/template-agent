@@ -10,7 +10,13 @@
     think ──(step limit)──> escalate ── interrupt: a person resumes or stops the run
 
 Runs are durable: with a Postgres checkpointer a run survives restarts and can wait days for a
-review. Every model turn, tool call and decision is in the run's trace for audit and evals.
+review. Every model turn, tool call and decision is in the run's trace (for evals and the API).
+
+The audit trail (audit.py) records what people decide and what the agent changes: the run's
+start (who asked), each review (who approved or rejected which changes), each approved change
+the agent makes (on whose behalf), and stops and resumes. Reads are audited by the MCP servers
+that serve them. Model turns and tool calls are OpenTelemetry spans (GenAI conventions), with
+token counts and tool names but never prompt or result text.
 """
 
 from __future__ import annotations
@@ -22,7 +28,9 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph import START, StateGraph
 from langgraph.types import Command, interrupt
+from opentelemetry import trace as otel
 
+from .audit import Actor, Auditor, MemorySink
 from .model import Model
 from .tools import Tool, ToolError, ToolHost
 
@@ -78,9 +86,59 @@ def system_prompt(product: str) -> str:
     return files("agent").joinpath("prompts/system.md").read_text().format(product=product)
 
 
-def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: Any = None) -> Any:
+tracer = otel.get_tracer("agent")
+
+
+def build_graph(
+    *,
+    model: Model,
+    tools: ToolHost,
+    product: str,
+    checkpointer: Any = None,
+    auditor: Auditor | None = None,
+    agent: str = "agent",
+) -> Any:
+    audit = auditor or Auditor(MemorySink(), service=agent)
+    me = Actor(id=agent, type="agent")
+
     def catalog() -> dict[str, Tool]:
         return {t.name: t for t in tools.tools()}
+
+    def call_tool(tool: Tool, args: dict[str, Any], key: str) -> str:
+        with tracer.start_as_current_span(f"execute_tool {tool.name}", kind=otel.SpanKind.INTERNAL) as span:
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            span.set_attribute("gen_ai.tool.name", tool.name)
+            span.set_attribute("gen_ai.tool.call.id", key.rsplit(":", 1)[-1])
+            try:
+                return tools.call(tool, args, key)
+            except ToolError as exc:
+                span.set_status(otel.Status(otel.StatusCode.ERROR, type(exc).__name__))
+                raise
+
+    def respond(**kw: Any) -> dict[str, Any]:
+        name = str(getattr(model, "model", "") or "")
+        with tracer.start_as_current_span(f"chat {name}".strip(), kind=otel.SpanKind.CLIENT) as span:
+            span.set_attribute("gen_ai.operation.name", "chat")
+            span.set_attribute("gen_ai.provider.name", "anthropic")
+            span.set_attribute("gen_ai.conversation.id", kw["labels"]["run"])
+            if name:
+                span.set_attribute("gen_ai.request.model", name)
+            reply = model.respond(**kw)
+            usage = reply.get("usage") or {}
+            for attr, k in (
+                ("gen_ai.usage.input_tokens", "input_tokens"),
+                ("gen_ai.usage.output_tokens", "output_tokens"),
+            ):
+                if usage.get(k) is not None:
+                    span.set_attribute(attr, int(usage[k]))
+            if reply.get("stop_reason"):
+                span.set_attribute("gen_ai.response.finish_reasons", [str(reply["stop_reason"])])
+            if reply.get("model"):
+                span.set_attribute("gen_ai.response.model", str(reply["model"]))
+            return reply
+
+    def requester(state: RunState) -> str:
+        return str((state.get("task") or {}).get("requested_by") or "")
 
     def run_reads(
         run_id: str, calls: list[dict[str, Any]], known: dict[str, Tool]
@@ -89,7 +147,7 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
         trace: list[dict[str, Any]] = []
         for c in calls:
             try:
-                out = tools.call(known[c["name"]], c.get("input") or {}, f"{run_id}:{c['id']}")
+                out = call_tool(known[c["name"]], c.get("input") or {}, f"{run_id}:{c['id']}")
                 results.append(_tool_result(c["id"], out))
                 trace.append(_event("tool_call", tool=c["name"], input=c.get("input"), ok=True))
             except ToolError as exc:
@@ -102,6 +160,15 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
     def start(state: RunState) -> dict[str, Any]:
         task = state["task"]
         text = task.get("text") or str(task)
+        who = requester(state)
+        audit.record(
+            "agent.run.start",
+            actor=Actor(id=who, type="user")
+            if who
+            else Actor(id=str(task.get("event_id") or "event"), type="service"),
+            resource=("run", [state["run_id"]]),
+            details={"task_type": str(task.get("type", ""))},
+        )
         return {
             "messages": [{"role": "user", "content": text}],
             "steps": 0,
@@ -114,7 +181,7 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
         if steps >= state.get("max_steps", 8):
             return Command(goto="escalate")
         known = catalog()
-        reply = model.respond(
+        reply = respond(
             system=system_prompt(product),
             messages=state["messages"],
             tools=[t.definition() for t in known.values()],
@@ -189,6 +256,17 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
             }
         )
         decision = normalize(decision, APPROVAL_DECISIONS)
+        pending = state.get("pending", [])
+        audit.record(
+            f"agent.change.{'approve' if decision['decision'] == 'approve' else 'reject'}",
+            actor=Actor(id=str(decision.get("reviewer") or ""), type="user"),
+            resource=("run", [state["run_id"]]),
+            on_behalf_of=requester(state),
+            details={
+                "approved": [w["name"] for w in pending if _approved(decision, w["id"])],
+                "rejected": [w["name"] for w in pending if not _approved(decision, w["id"])],
+            },
+        )
         return Command(
             goto="act",
             update={
@@ -214,17 +292,30 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
                     )
                 )
                 continue
+            outcome, reason = "success", ""
             try:
-                out = tools.call(known[w["name"]], w.get("input") or {}, f"{state['run_id']}:{w['id']}")
+                out = call_tool(known[w["name"]], w.get("input") or {}, f"{state['run_id']}:{w['id']}")
                 results.append(_tool_result(w["id"], out))
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=True, approved=True)
                 )
             except ToolError as exc:
+                outcome, reason = "failure", "the tool refused the change"
                 results.append(_tool_result(w["id"], str(exc), error=True))
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=False, error=str(exc))
                 )
+            # The MCP server audits the records it changed; this ties the change to the run,
+            # the person it was done for and the approval.
+            audit.record(
+                "agent.change.apply",
+                actor=me,
+                resource=("run", [state["run_id"]]),
+                outcome=outcome,  # type: ignore[arg-type]
+                reason=reason,
+                on_behalf_of=requester(state),
+                details={"tool": w["name"], "tool_call_id": w["id"]},
+            )
         return Command(
             goto="think",
             update={
@@ -246,6 +337,12 @@ def build_graph(*, model: Model, tools: ToolHost, product: str, checkpointer: An
                 }
             ),
             TAKEOVER_DECISIONS,
+        )
+        audit.record(
+            f"agent.run.{decision['decision']}",
+            actor=Actor(id=str(decision.get("reviewer") or ""), type="user"),
+            resource=("run", [state["run_id"]]),
+            on_behalf_of=requester(state),
         )
         if decision["decision"] == "stop":
             return Command(
