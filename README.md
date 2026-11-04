@@ -33,6 +33,7 @@ event / POST /runs
 | Audit | Every model turn (with token counts), tool call, refusal and decision is in the run's trace. |
 | Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
 | Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
+| Feature flags | OpenFeature with the OFREP provider, pointed at the product's Flipt (`AGENT_FLAGS_URL`). The SDLC tool creates each feature's flag; put new behavior behind `flags.enabled("<key>")`. Unset, every flag is off. |
 
 ## API
 
@@ -95,6 +96,9 @@ uv run agent
 | `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only) |
 | `AGENT_OIDC_ISSUER`, `AGENT_OIDC_AUDIENCE`, `AGENT_OIDC_JWKS_URL` | | Required |
 | `AGENT_RUN_SCOPE`, `AGENT_REVIEW_SCOPE` | `agent:run`, `agent:review` | |
+| `AGENT_FLAGS_URL` | | The product's Flipt; unset, every feature flag reads as off |
+| `AGENT_FLAGS_ENVIRONMENT`, `AGENT_FLAGS_NAMESPACE` | | Flipt environment (e.g. `production`) and the product's namespace (e.g. `emr`) |
+| `AGENT_FLAGS_TOKEN` | | A Flipt client token, if the product's Flipt requires one |
 
 ## Delivery
 
