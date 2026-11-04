@@ -9,7 +9,7 @@ COPY src src
 COPY README.md ./
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.13-slim-bookworm
+FROM python:3.15-slim-bookworm
 RUN useradd --uid 10001 --no-create-home app
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
