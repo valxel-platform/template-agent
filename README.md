@@ -30,7 +30,8 @@ event / POST /runs
 | Durability | Runs are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
 | Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. |
 | Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. |
-| Audit | Every model turn (with token counts), tool call, refusal and decision is in the run's trace. |
+| Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `vrixel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
+| Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
 | Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
 | Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
 | Feature flags | OpenFeature with the OFREP provider, pointed at the product's Flipt (`AGENT_FLAGS_URL`). The SDLC tool creates each feature's flag; put new behavior behind `flags.enabled("<key>")`. Unset, every flag is off. |
@@ -99,6 +100,12 @@ uv run agent
 | `AGENT_FLAGS_URL` | | The product's Flipt; unset, every feature flag reads as off |
 | `AGENT_FLAGS_ENVIRONMENT`, `AGENT_FLAGS_NAMESPACE` | | Flipt environment (e.g. `production`) and the product's namespace (e.g. `emr`) |
 | `AGENT_FLAGS_TOKEN` | | A Flipt client token, if the product's Flipt requires one |
+| `AGENT_PRODUCT`, `AGENT_ENVIRONMENT`, `AGENT_DATA_CLASS` | | Stamped on every audit record (`data_class`: `general`, `phi` or `payments`) |
+| `AGENT_AUDIT_SINK` | `log` | `kafka` in deployed environments; `log` writes JSON lines locally |
+| `AGENT_AUDIT_KAFKA_BOOTSTRAP`, `AGENT_AUDIT_TOPIC` | `audit.v1` | The product's Kafka and its audit topic |
+| `AGENT_AUDIT_KAFKA_CONFIG` | `{}` | JSON of extra client settings (`security.protocol`, `sasl.*`) |
+| `AGENT_AUDIT_REQUIRED` | `true` | A decision or change whose record isn't acknowledged by Kafka is not applied |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | Standard OpenTelemetry settings; point the endpoint at the data plane's collector |
 
 ## Delivery
 
