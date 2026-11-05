@@ -158,7 +158,9 @@ def test_people_and_changes_are_audited_and_the_run_is_traced(world: World, tool
         ("agent.change.apply", "intake-agent", "agent", "success"),
     ]
     assert data[1]["details"] == {"approved": ["care__create_task"], "rejected": []}
-    assert data[2]["on_behalf_of"] == "svc-intake" and data[2]["details"]["tool"] == "care__create_task"
+    # The change ran with the approver's delegated token, so it was done on their behalf.
+    assert data[2]["on_behalf_of"] == "nurse-7" and data[2]["details"]["tool"] == "care__create_task"
+    assert data[2]["details"]["requested_by"] == "svc-intake"
     assert all(d["resource"] == {"type": "run", "ids": [run["run_id"]]} for d in data)
     assert "Ana Lopez" not in str(sink.events)
 

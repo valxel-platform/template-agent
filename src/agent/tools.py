@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import os
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import anyio
+
+from . import delegation
 
 
 @dataclass(frozen=True)
@@ -36,11 +37,16 @@ class McpToolHost:
     """MCP servers over Streamable HTTP (or in-process servers in tests)."""
 
     def __init__(
-        self, servers: dict[str, Any], allowed: list[str], tokens: dict[str, str] | None = None
+        self,
+        servers: dict[str, Any],
+        allowed: list[str],
+        audiences: dict[str, tuple[str, str]] | None = None,
+        exchange: delegation.TokenExchange | None = None,
     ) -> None:
         self.servers = servers  # name -> URL or in-process server
         self.allowed = allowed
-        self.tokens = tokens or {}
+        self.audiences = audiences or {}  # name -> (audience, scope)
+        self.exchange = exchange
         self._tools: list[Tool] | None = None
 
     @classmethod
@@ -48,10 +54,28 @@ class McpToolHost:
         return cls(
             {s.name: s.url for s in settings.mcp_servers},
             settings.allowed_tools,
-            {s.name: os.environ.get(s.token_env, "") for s in settings.mcp_servers if s.token_env},
+            {s.name: (s.audience, s.scope) for s in settings.mcp_servers},
+            delegation.from_settings(settings),
         )
 
-    async def _session(self, server: str, fn: Any) -> Any:
+    def bearer(self, server: str, *, listing: bool = False) -> str | None:
+        """The token for a call to `server`: for the person behind this step, exchanged for that
+        server only. Listing tools uses the agent's own identity (metadata, no records)."""
+        audience, scope = self.audiences.get(server, ("", ""))
+        if not audience:
+            return None  # a server outside the realm (local development, in-process tests)
+        if self.exchange is None:
+            raise delegation.DelegationError(
+                f"{server} needs a token: set AGENT_TOKEN_URL and AGENT_CLIENT_ID"
+            )
+        if listing:
+            return self.exchange.for_agent(audience, scope)
+        person = delegation.current()
+        if not person:
+            raise ToolError(f"No person to act for at {server}: a person needs to approve again")
+        return self.exchange.for_person(person, audience, scope)
+
+    async def _session(self, server: str, fn: Any, listing: bool = False) -> Any:
         from mcp.client.client import Client
         from mcp.client.streamable_http import (  # type: ignore[attr-defined]
             create_mcp_http_client,
@@ -60,7 +84,8 @@ class McpToolHost:
 
         target = self.servers[server]
         if isinstance(target, str):
-            headers = {"Authorization": f"Bearer {self.tokens[server]}"} if self.tokens.get(server) else {}
+            token = self.bearer(server, listing=listing)
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
             target = streamable_http_client(target, http_client=create_mcp_http_client(headers=headers))
         async with Client(target) as client:
             return await fn(client)
@@ -73,7 +98,7 @@ class McpToolHost:
                 async def list_tools(c: Any) -> Any:
                     return (await c.list_tools()).tools
 
-                for t in anyio.run(self._session, server, list_tools):
+                for t in anyio.run(self._session, server, list_tools, True):
                     name = f"{server}__{t.name}"
                     if not any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(t.name, p) for p in self.allowed):
                         continue
