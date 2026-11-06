@@ -273,7 +273,12 @@ def build_graph(
                 "trace": [_event("review", **decision)],
                 "status": "running",
                 "pending": [
-                    {**w, "_approved": _approved(decision, w["id"]), "_note": decision.get("note") or ""}
+                    {
+                        **w,
+                        "_approved": _approved(decision, w["id"]),
+                        "_note": decision.get("note") or "",
+                        "_by": str(decision.get("reviewer") or ""),
+                    }
                     for w in state.get("pending", [])
                 ],
             },
@@ -313,8 +318,9 @@ def build_graph(
                 resource=("run", [state["run_id"]]),
                 outcome=outcome,  # type: ignore[arg-type]
                 reason=reason,
-                on_behalf_of=requester(state),
-                details={"tool": w["name"], "tool_call_id": w["id"]},
+                # The change ran with its approver's delegated token, so it was done for them.
+                on_behalf_of=w.get("_by") or requester(state),
+                details={"tool": w["name"], "tool_call_id": w["id"], "requested_by": requester(state)},
             )
         return Command(
             goto="think",

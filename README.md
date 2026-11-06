@@ -25,6 +25,7 @@ event / POST /runs
 | --- | --- |
 | Models | Anthropic SDK pointed at the product's LLM gateway (`AGENT_GATEWAY_URL`). The gateway enforces the data class (PHI only to BAA providers), redacts, meters spend and holds the provider keys; the agent holds only a gateway key. System prompt and tools are prompt-cached. |
 | Tools | The product's MCP servers (`AGENT_MCP_SERVERS`), filtered by an allowlist (`AGENT_ALLOWED_TOOLS`). Tools annotated `readOnlyHint` run immediately; everything else, including unannotated tools, needs approval. |
+| Acting for people | Every MCP call carries a token Keycloak exchanged (RFC 8693) for that server only, on behalf of the person behind the step: the run's starter for its steps, the approver for the changes they approved. No fixed tokens; people's tokens stay in memory, never in checkpoints (`delegation.py`). |
 | Human approval | A LangGraph interrupt. Reviewers can approve all, approve some (`approved_ids`) or reject with a note the model sees. The reviewer's identity is in the trace. |
 | Safe retries | Each approved call carries `idempotency_key = <run>:<tool_use_id>`; `POST /runs` takes an `Idempotency-Key`; events are keyed by their id. |
 | Durability | Runs are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
@@ -79,7 +80,7 @@ Run locally against a gateway:
 
 ```
 export AGENT_GATEWAY_URL=http://localhost:8080 AGENT_GATEWAY_KEY=...
-export AGENT_MCP_SERVERS='[{"name":"care","url":"http://localhost:9000/mcp","token_env":"CARE_TOKEN"}]'
+export AGENT_MCP_SERVERS='[{"name":"care","url":"http://localhost:9000/mcp"}]'   # no audience: no token locally
 export AGENT_OIDC_ISSUER=... AGENT_OIDC_AUDIENCE=... AGENT_OIDC_JWKS_URL=...
 uv run agent
 ```
@@ -91,7 +92,9 @@ uv run agent
 | `AGENT_NAME` | `intake-agent` | Sent to the gateway as `x-vrixel-agent` for budgets and usage |
 | `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_KEY` | | The product's LLM gateway and this agent's key |
 | `AGENT_MODEL`, `AGENT_MAX_TOKENS` | `claude-sonnet-5-5`, `2048` | The gateway's model allowlist applies |
-| `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, token_env}` |
+| `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, audience, scope}`: `audience` is the server's client in the realm |
+| `AGENT_TOKEN_URL`, `AGENT_CLIENT_ID` | | The realm's token endpoint and this agent's client, for token exchange |
+| `AGENT_CLIENT_KEY_FILE`, `AGENT_CLIENT_KEY_ID` | | `private_key_jwt` client authentication (preferred), or `AGENT_CLIENT_SECRET` |
 | `AGENT_ALLOWED_TOOLS` | `["*"]` | fnmatch patterns on `<server>__<tool>`; list tools explicitly in production |
 | `AGENT_MAX_STEPS` | `8` | |
 | `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only) |

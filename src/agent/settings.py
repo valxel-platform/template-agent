@@ -10,7 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class McpServer(BaseModel):
     name: str
     url: str
-    token_env: str = ""  # env var holding this agent's bearer token for the server
+    # The server's audience in the product's Keycloak realm (its client id), and the scopes this
+    # agent may request there. Calls carry a token exchanged for the person behind the step
+    # (delegation.py); there are no fixed tokens.
+    audience: str = ""
+    scope: str = ""
 
 
 class Settings(BaseSettings):
@@ -33,6 +37,13 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    # Acting for people at MCP servers: token exchange at the realm's token endpoint, as this
+    # agent's client. private_key_jwt (a key file) rather than a shared secret where possible.
+    token_url: str = ""  # https://id.<domain>/realms/<product>/protocol/openid-connect/token
+    client_id: str = ""
+    client_secret: str = ""
+    client_key_file: str = ""
+    client_key_id: str = ""
     # Audit trail (audit.py): "kafka" in deployed environments, "log" locally.
     product: str = ""  # e.g. emr
     environment: str = ""  # e.g. production

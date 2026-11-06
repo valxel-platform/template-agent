@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +28,7 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import flags, telemetry
+from . import delegation, flags, telemetry
 from .audit import Auditor, AuditUnavailable, make_sink
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
 from .model import GatewayModel, Model
@@ -78,6 +79,9 @@ def jwt_verifier(settings: Settings) -> Verifier:
     return verify
 
 
+BEARER = "_bearer"  # the caller's raw token, carried beside its verified claims
+
+
 def _scopes(claims: dict[str, Any]) -> set[str]:
     raw = claims.get("scope") or claims.get("scp") or ""
     return set(raw.split()) if isinstance(raw, str) else set(raw)
@@ -101,6 +105,19 @@ class Runner:
         )
         self.decisions = Counter("agent_decisions", "Review decisions", ["decision"], registry=self.registry)
         self.errors = Counter("agent_run_errors", "Runs that raised", registry=self.registry)
+        # run id -> (token of the person behind its next steps, when it expires). Memory only:
+        # never in the checkpoint, so a stolen database holds no one's credentials.
+        self.people: dict[str, tuple[str, float | None]] = {}
+
+    def person(self, run_id: str) -> str | None:
+        held = self.people.get(run_id)
+        if not held:
+            return None
+        token, expires = held
+        if expires is not None and time.time() >= expires:
+            self.people.pop(run_id, None)
+            return None
+        return token
 
     @staticmethod
     def config(run_id: str) -> dict[str, Any]:
@@ -126,7 +143,8 @@ class Runner:
                 span.set_attribute("gen_ai.operation.name", "invoke_agent")
                 span.set_attribute("gen_ai.agent.name", self.name)
                 span.set_attribute("gen_ai.conversation.id", run_id)
-                self.graph.invoke(payload, self.config(run_id))
+                with delegation.acting_for(self.person(run_id)):
+                    self.graph.invoke(payload, self.config(run_id))
             self.problems.pop(run_id, None)
             self.finished.labels(self.view(run_id)["status"]).inc()
         except AuditUnavailable:
@@ -143,18 +161,20 @@ class Runner:
             with self.lock:
                 self.active.discard(run_id)
 
-    def submit(self, run_id: str, payload: Any, wait: bool = False) -> None:
+    def submit(self, run_id: str, payload: Any, wait: bool = False, person: str | None = None) -> None:
         with self.lock:
             if run_id in self.active:
                 raise HTTPException(409, "This run is already working; try again when it pauses.")
             self.active.add(run_id)
+            if person:
+                self.people[run_id] = (person, delegation.unverified_expiry(person))
         fut = self.pool.submit(self._in_context, otel_context.get_current(), run_id, payload)
         if wait:
             fut.result()
 
-    def start(self, run_id: str, task: dict[str, Any], wait: bool = False) -> None:
+    def start(self, run_id: str, task: dict[str, Any], wait: bool = False, person: str | None = None) -> None:
         self.started.inc()
-        self.submit(run_id, {"run_id": run_id, "task": task, "max_steps": self.max_steps}, wait)
+        self.submit(run_id, {"run_id": run_id, "task": task, "max_steps": self.max_steps}, wait, person)
 
     def view(self, run_id: str) -> dict[str, Any]:
         snap = self.graph.get_state(self.config(run_id))
@@ -266,17 +286,18 @@ def create_app(
                 ) from exc
             if scope not in _scopes(claims):
                 raise HTTPException(403, f"The token needs the {scope} scope.")
-            return claims
+            # Kept for delegation (the run's next steps act for this person), never logged or stored.
+            return {**claims, BEARER: authorization[7:]}
 
         return dep
 
     can_run = Depends(caller(settings.run_scope))
     can_review = Depends(caller(settings.review_scope))
 
-    def start(key: str, task: dict[str, Any]) -> dict[str, Any]:
+    def start(key: str, task: dict[str, Any], person: str | None) -> dict[str, Any]:
         run_id = str(uuid.uuid5(NAMESPACE, key))
         if not runner.exists(run_id):
-            runner.start(run_id, task, wait=synchronous)
+            runner.start(run_id, task, wait=synchronous, person=person)
         return runner.view(run_id) if runner.exists(run_id) else {"run_id": run_id, "status": "working"}
 
     @app.post("/runs", status_code=202)
@@ -284,13 +305,14 @@ def create_app(
         body: RunRequest, claims: dict[str, Any] = can_run, idempotency_key: str = Header(default="")
     ) -> dict[str, Any]:
         key = f"{claims.get('sub', '')}:{idempotency_key}" if idempotency_key else str(uuid.uuid4())
-        return start(key, {**body.task, "requested_by": claims.get("sub", "")})
+        return start(key, {**body.task, "requested_by": claims.get("sub", "")}, claims.get(BEARER))
 
     @app.post("/events", status_code=202)
     def event(body: EventRequest, claims: dict[str, Any] = can_run) -> dict[str, Any]:
         return start(
             f"event:{body.type}:{body.id}",
             {"type": body.type, "text": body.text, **body.data, "event_id": body.id},
+            claims.get(BEARER),
         )
 
     @app.get("/runs/{run_id}")
@@ -312,7 +334,8 @@ def create_app(
                 raise HTTPException(422, f"Not proposed in this run: {', '.join(sorted(unknown))}.")
         runner.decisions.labels(body.decision).inc()
         resume = {**body.model_dump(), "reviewer": claims.get("sub", "")}
-        runner.submit(run_id, Command(resume=resume), wait=synchronous)
+        # An approved change runs for its approver: their token, exchanged per MCP server.
+        runner.submit(run_id, Command(resume=resume), wait=synchronous, person=claims.get(BEARER))
         return runner.view(run_id)
 
     @app.get("/healthz")
