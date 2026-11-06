@@ -110,6 +110,16 @@ uv run agent
 | `AGENT_AUDIT_REQUIRED` | `true` | A decision or change whose record isn't acknowledged by Kafka is not applied |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | Standard OpenTelemetry settings; point the endpoint at the data plane's collector |
 
+## Errors and traces
+
+Every response carries a W3C `traceresponse` header with its trace id (`errors.py`), which the web
+and mobile apps put on the errors they report, so the SDLC tool sees a failure people hit and an
+error here as one incident. With `SENTRY_DSN` set, unhandled exceptions and `ERROR` logs go to
+Sentry, grouped into issues, with the exception type, stack, endpoint path and a `trace_id` tag
+only: never exception messages, formatted messages, local variables, queries, headers, bodies,
+users or breadcrumbs. Also `ENVIRONMENT` and `SENTRY_RELEASE`. Unset, Sentry is off; logs, traces
+and metrics stay in OpenChoreo. For PHI products use a Sentry plan under a BAA, or self-hosted Sentry.
+
 ## Delivery
 
 CI (`ci.yml`) runs `unit` and `evals`, dependency review and an image build; CodeQL comes from

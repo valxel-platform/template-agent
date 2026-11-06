@@ -28,7 +28,7 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import delegation, flags, telemetry
+from . import delegation, errors, flags, telemetry
 from .audit import Auditor, AuditUnavailable, make_sink
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
 from .model import GatewayModel, Model
@@ -269,6 +269,9 @@ def create_app(
     )
     runner = Runner(graph, settings.max_steps, name=settings.name)
     app = FastAPI(title=settings.name, version="0.1.0")
+    # Each response names its trace (traceresponse); errors go to Sentry when SENTRY_DSN is set.
+    app.add_middleware(errors.TraceResponseMiddleware)
+    errors.start_errors()
     telemetry.setup(settings.name, app=app)
     app.state.runner = runner
 
