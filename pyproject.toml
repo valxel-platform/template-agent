@@ -24,6 +24,7 @@ dependencies = [
   "opentelemetry-instrumentation-httpx>=0.66b2",
   "opentelemetry-instrumentation-requests>=0.66b2",
   "opentelemetry-instrumentation-psycopg>=0.66b2",
+  "sentry-sdk>=2.72,<3",
 ]
 
 [project.scripts]
