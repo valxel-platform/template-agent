@@ -25,6 +25,7 @@ from openfeature import api
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.provider import FeatureProvider
 
+from . import cohorts
 from .settings import Settings
 
 log = logging.getLogger("agent.flags")
@@ -52,6 +53,10 @@ def use_provider(provider: FeatureProvider) -> None:
 
 
 def enabled(key: str, default: bool = False, *, user: str = "", **attributes: Any) -> bool:
-    """The flag's value for this caller. Any error (server down, unknown flag) gives `default`."""
+    """The flag's value for this caller. Any error (server down, unknown flag) gives `default`.
+    Pass the user: a gradual release turns a feature on for a share of users, and each keeps the
+    same answer. The request counts toward the flag's on or off side (`cohorts`)."""
     context = EvaluationContext(targeting_key=user or None, attributes=attributes)
-    return bool(api.get_client().get_boolean_value(key, default, context))
+    on = bool(api.get_client().get_boolean_value(key, default, context))
+    cohorts.seen(key, on)
+    return on
