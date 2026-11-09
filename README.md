@@ -132,3 +132,14 @@ CI (`ci.yml`) runs `unit` and `evals`, dependency review and an image build; Cod
 the repo's default setup. These are the required checks the Vrixel SDLC sets on repos with the
 `agent` role. The SDLC deploys through OpenChoreo and then sends `vrixel-deployed`, which runs
 `post-deploy.yml`: the smoke check at every stage, and live evals in dev.
+
+## Performance tests
+
+When the Vrixel SDLC labels a pull request `vrixel:perf-smoke` (the graph, the tools, the API or
+the runtime changes; or the reviewer saw a performance risk), `perf.yml` runs the recorded evals on
+main's code and the PR's (`python -m evals.run --perf`): the most model turns a case takes, seconds
+per case and tokens per case. `perf/compare.py` posts `perf-smoke / report`: failed when the PR
+needs more turns, 20% more tokens than main, or misses the budget (8 turns, 60 s per run). Live
+model latency shows in the post-deploy evals and the pilot's timings; an agent has no staging load
+test (it would pay for model calls).
+

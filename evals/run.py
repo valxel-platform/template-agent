@@ -7,6 +7,9 @@
 Each case runs against the in-memory world, with a scripted reviewer, and is graded on what the
 agent did. Replay catches regressions in the graph, prompts' plumbing and graders; live runs catch
 model and prompt regressions. Results go to JUnit for the "evals / report" status.
+
+With --perf, also writes the run's performance: the most model turns any case took, the 95th
+percentile seconds per case, and the mean tokens per case (what a run costs), for perf/compare.py.
 """
 
 from __future__ import annotations
@@ -77,10 +80,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--record", action="store_true")
     ap.add_argument("--case")
     ap.add_argument("--junit", default="reports/evals.xml")
+    ap.add_argument("--perf", help="write turns, seconds and tokens per case as JSON here")
     args = ap.parse_args(argv)
 
     suite = ET.Element("testsuite", name="evals")
     failed = 0
+    turns: list[int] = []
+    seconds: list[float] = []
+    tokens: list[int] = []
     for case in load_cases(args.case):
         cassette = HERE / "cassettes" / f"{case['id']}.json"
         if args.live:
@@ -100,11 +107,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             run, world = run_case(case, model)
             fails = grade(case, run, world)
+            used = model.responses if isinstance(model, Recorder) else _consumed(cassette, model)
+            turns.append(len(used))
+            tokens.append(sum(_tokens(r) for r in used))
         except Exception as exc:  # noqa: BLE001  (a crash is a failed case, not a failed suite)
             fails = [f"{type(exc).__name__}: {exc}"]
-        tc = ET.SubElement(
-            suite, "testcase", classname="evals", name=case["id"], time=f"{time.monotonic() - started:.3f}"
-        )
+        seconds.append(time.monotonic() - started)
+        tc = ET.SubElement(suite, "testcase", classname="evals", name=case["id"], time=f"{seconds[-1]:.3f}")
         if fails:
             failed += 1
             ET.SubElement(tc, "failure", message=fails[0]).text = "\n".join(fails)
@@ -116,7 +125,30 @@ def main(argv: list[str] | None = None) -> int:
     Path(args.junit).parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(suite).write(args.junit, encoding="utf-8", xml_declaration=True)
     print(f"{len(suite) - failed}/{len(suite)} passed")
+    if args.perf:
+        ordered = sorted(seconds)
+        perf = {
+            "turns_max": max(turns or [0]),
+            "run_p95_s": round(
+                ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))] if ordered else 0.0, 3
+            ),
+            "tokens_per_run": round(sum(tokens) / max(1, len(tokens))),
+        }
+        Path(args.perf).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.perf).write_text(json.dumps(perf, indent=2))
+        print(json.dumps(perf))
     return 1 if failed else 0
+
+
+def _consumed(cassette: Path, model: Any) -> list[dict[str, Any]]:
+    """The recorded responses this case used (the replay pops them in order)."""
+    recorded = json.loads(cassette.read_text())
+    return [r for r in recorded[: len(getattr(model, "calls", []))] if isinstance(r, dict)]
+
+
+def _tokens(response: dict[str, Any]) -> int:
+    usage = response.get("usage") or {}
+    return int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,49 @@
+# Performance smoke test, on pull requests the Vrixel SDLC labels vrixel:perf-smoke or
+# vrixel:perf-full. The recorded evals run on main's code and the PR's: the most model turns a case
+# takes, seconds per case, and tokens per case (what a run costs). perf/compare.py posts
+# "perf-smoke / report": failed when the PR needs more turns or 20% more tokens than main, or misses
+# the budget (8 turns, 60 s per run). Live latency is the post-deploy evals' to watch.
+name: perf
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  perf-smoke:
+    name: perf-smoke
+    if: contains(github.event.pull_request.labels.*.name, 'vrixel:perf-smoke') || contains(github.event.pull_request.labels.*.name, 'vrixel:perf-full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: main
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Run the recorded evals on main's code, then the PR's
+        run: |
+          mkdir -p out
+          # main may predate --perf: then the PR is judged against the budget only.
+          (cd main && uv sync --locked --quiet && uv run python -m evals.run --junit ../out/main.xml --perf ../out/main.json) || true
+          (cd pr && uv sync --locked --quiet && uv run python -m evals.run --junit ../out/pr.xml --perf ../out/pr.json)
+      - name: Judge and report
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 pr/perf/compare.py --kind agent --run out/pr.json --reference out/main.json --regression 20 --context "perf-smoke / report"

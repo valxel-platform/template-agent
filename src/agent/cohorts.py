@@ -1,12 +1,14 @@
 """Users with a feature on against users with it off, while the SDLC tool releases it gradually.
 
 Every request that evaluates a flag (`flags.enabled`) counts once for that flag, on the side the
-caller got, and as failed when it ends in a 5xx or an exception. Once a minute each flag's counts
-are logged as one line, which the tool sums across pods from OpenChoreo's logs and compares:
-users who fail more with the feature on stop its release.
+caller got, as failed when it ends in a 5xx or an exception, and as slow when it takes longer
+than the run budget (`FLAG_COHORTS_SLOW_MS`, 60 s: an agent's run, not an API's answer). Once a
+minute each flag's counts are logged as one line, which the tool sums across pods from
+OpenChoreo's logs and compares: users who fail more, or wait longer, with the feature on stop its
+release.
 
-    vrixel.flag_cohorts {"flag": "emr.emr-feat-3.kiosk", "on": {"requests": 40, "errors": 0},
-                         "off": {"requests": 760, "errors": 2}}
+    vrixel.flag_cohorts {"flag": "emr.emr-feat-3.kiosk", "on": {"requests": 40, "errors": 0, "slow": 1},
+                         "off": {"requests": 760, "errors": 2, "slow": 9}}
 
 Only counts leave the service: no user, request or value beyond the flag's key.
 """
@@ -16,8 +18,10 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import re
 import threading
+import time
 from contextvars import ContextVar
 from typing import Any
 
@@ -25,7 +29,9 @@ MARKER = "vrixel.flag_cohorts"
 log = logging.getLogger("agent.cohorts")
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,200}")
 _current: ContextVar[dict[str, bool] | None] = ContextVar("flag_cohorts", default=None)
-_counts: dict[str, list[int]] = {}  # flag -> [on requests, on errors, off requests, off errors]
+# flag -> [on requests, on errors, on slow, off requests, off errors, off slow]
+_counts: dict[str, list[int]] = {}
+SLOW_MS = float(os.environ.get("FLAG_COHORTS_SLOW_MS", "60000"))
 _lock = threading.Lock()
 _reporter: threading.Thread | None = None
 
@@ -41,18 +47,20 @@ def begin() -> Any:
     return _current.set({})
 
 
-def end(token: Any, failed: bool) -> None:
+def end(token: Any, failed: bool, elapsed_ms: float = 0.0) -> None:
     current = _current.get() or {}
     _current.reset(token)
     if not current:
         return
     with _lock:
         for key, on in current.items():
-            c = _counts.setdefault(key, [0, 0, 0, 0])
-            side = 0 if on else 2
+            c = _counts.setdefault(key, [0, 0, 0, 0, 0, 0])
+            side = 0 if on else 3
             c[side] += 1
             if failed:
                 c[side + 1] += 1
+            if elapsed_ms > SLOW_MS:
+                c[side + 2] += 1
 
 
 def drain() -> list[str]:
@@ -63,7 +71,11 @@ def drain() -> list[str]:
     return [
         f"{MARKER} "
         + json.dumps(
-            {"flag": k, "on": {"requests": c[0], "errors": c[1]}, "off": {"requests": c[2], "errors": c[3]}},
+            {
+                "flag": k,
+                "on": {"requests": c[0], "errors": c[1], "slow": c[2]},
+                "off": {"requests": c[3], "errors": c[4], "slow": c[5]},
+            },
             separators=(",", ":"),
         )
         for k, c in sorted(counts.items())
@@ -112,6 +124,7 @@ class CohortMiddleware:
             await send(message)
 
         token = begin()
+        started = time.monotonic()
         failed = False
         try:
             await self.app(scope, receive, watch)
@@ -119,4 +132,4 @@ class CohortMiddleware:
             failed = True
             raise
         finally:
-            end(token, failed or status["code"] >= 500)
+            end(token, failed or status["code"] >= 500, (time.monotonic() - started) * 1000)
