@@ -137,8 +137,11 @@ def github(method: str, path: str, body: dict | None = None) -> dict | None:
     token, api = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_API_URL", "https://api.github.com")
     if not token or not api.startswith("https://"):
         return None
-    req = urllib.request.Request(  # noqa: S310 (https only, checked above)api + path, method=method, data=json.dumps(body).encode() if body else None,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    req = urllib.request.Request(  # noqa: S310 (https only, checked above)
+        api + path,
+        method=method,
+        data=json.dumps(body).encode() if body else None,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 (https only)
