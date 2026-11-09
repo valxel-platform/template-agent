@@ -50,8 +50,8 @@ def test_each_request_counts_once_on_the_side_the_caller_got(app):
     assert line.startswith(cohorts.MARKER + " ")
     assert json.loads(line[len(cohorts.MARKER) :]) == {
         "flag": KEY,
-        "on": {"requests": 2, "errors": 1},
-        "off": {"requests": 1, "errors": 0},
+        "on": {"requests": 2, "errors": 1, "slow": 0},
+        "off": {"requests": 1, "errors": 0, "slow": 0},
     }
     assert cohorts.drain() == []  # counts start again
 
@@ -63,14 +63,14 @@ def test_outside_a_request_nothing_is_counted_and_reports_are_logged(caplog):
     token = cohorts.begin()
     cohorts.seen(KEY, True)
     cohorts.seen("not a key!", True)
-    cohorts.end(token, failed=False)
+    cohorts.end(token, failed=False, elapsed_ms=cohorts.SLOW_MS + 1)
     with caplog.at_level(logging.INFO, logger="agent.cohorts"):
         cohorts.report()
     assert [r.getMessage() for r in caplog.records] == [
         cohorts.MARKER
         + ' {"flag":"'
         + KEY
-        + '","on":{"requests":1,"errors":0},"off":{"requests":0,"errors":0}}'
+        + '","on":{"requests":1,"errors":0,"slow":1},"off":{"requests":0,"errors":0,"slow":0}}'
     ]
     cohorts.start_reporting(period_s=3600)
     cohorts.start_reporting(period_s=3600)  # once only
