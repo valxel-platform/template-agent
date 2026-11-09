@@ -6,7 +6,8 @@ failure people saw and an error here are one incident.
 
 With SENTRY_DSN set, unhandled exceptions and ERROR logs go to Sentry, grouped into issues, and
 Sentry's issue alerts reach the SDLC tool as incident signals. An event keeps the exception type,
-its stack, the endpoint's path and method, the log message's pattern and a `trace_id` tag; never
+its stack, the endpoint's path and method, the log message's pattern, a `trace_id` tag and a
+`component` tag (component.py, so the SDLC tool routes the issue here); never
 exception messages, formatted messages or their arguments, local variables, query strings,
 headers, cookies, bodies, users or breadcrumbs: any of them can carry PHI or a token. Unset,
 Sentry is off. Also ENVIRONMENT and SENTRY_RELEASE (the image tag). Logs, traces and metrics stay
@@ -19,6 +20,8 @@ import os
 from typing import Any, cast
 
 from opentelemetry import trace
+
+from .component import COMPONENT
 
 HEADER = b"traceresponse"
 
@@ -105,4 +108,6 @@ def start_errors(environ: dict[str, str] | None = None) -> bool:
         before_send=cast(Any, scrub),
         before_breadcrumb=lambda crumb, hint: None,
     )
+    # Every report names its component, so the SDLC tool routes its issues to it.
+    sentry_sdk.set_tag("component", COMPONENT)
     return True

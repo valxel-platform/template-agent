@@ -82,6 +82,8 @@ def test_sentry_starts_only_with_a_dsn(monkeypatch: Any) -> None:
     import sentry_sdk
 
     monkeypatch.setattr(sentry_sdk, "init", lambda **kw: calls.append(kw))
+    tags: dict[str, str] = {}
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda k, v: tags.__setitem__(k, v))
     assert errors.start_errors({}) is False and calls == []
     assert errors.start_errors(
         {"SENTRY_DSN": "https://k@o1.ingest.sentry.io/42", "ENVIRONMENT": "production"}
@@ -90,3 +92,4 @@ def test_sentry_starts_only_with_a_dsn(monkeypatch: Any) -> None:
     assert kw["environment"] == "production" and kw["send_default_pii"] is False
     assert kw["include_local_variables"] is False and kw["before_send"] is errors.scrub  # cast keeps it
     assert kw["before_breadcrumb"]({"message": "x"}, None) is None
+    assert tags == {"component": "template-agent"}  # the tool routes issues by it
