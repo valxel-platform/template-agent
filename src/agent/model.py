@@ -1,10 +1,14 @@
 """Model access. Always through the product's LLM gateway with the standard Anthropic SDK: the
 gateway decides which providers are allowed, redacts what must not leave, and meters spend.
 The system prompt and tool definitions are marked for prompt caching, so repeated turns of a run
-pay for them once."""
+pay for them once.
+
+`on_text`, when given, receives the reply's text as the model writes it (a conversation shows it
+to the person while it is written); the full reply is returned either way."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import anthropic
@@ -18,6 +22,7 @@ class Model(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         labels: dict[str, str],
+        on_text: Callable[[str], None] | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -49,19 +54,31 @@ class GatewayModel:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         labels: dict[str, str],
+        on_text: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         cached_tools = [dict(t) for t in tools]
         if cached_tools:
             cached_tools[-1]["cache_control"] = {"type": "ephemeral"}
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=messages,  # type: ignore[arg-type]
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            tools=cached_tools,  # type: ignore[arg-type]
-            extra_headers={"x-vrixel-agent": self.agent, **{f"x-vrixel-{k}": v for k, v in labels.items()}},
-        )
-        return msg.model_dump(mode="json", exclude_none=True)
+        kw: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "tools": cached_tools,
+            "extra_headers": {
+                "x-vrixel-agent": self.agent,
+                **{f"x-vrixel-{k}": v for k, v in labels.items()},
+            },
+        }
+        if on_text is None:
+            msg = self.client.messages.create(**kw)
+        else:
+            with self.client.messages.stream(**kw) as stream:
+                for chunk in stream.text_stream:
+                    on_text(chunk)
+                msg = stream.get_final_message()
+        out: dict[str, Any] = msg.model_dump(mode="json", exclude_none=True)
+        return out
 
 
 class ScriptedModel:
@@ -79,10 +96,15 @@ class ScriptedModel:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         labels: dict[str, str],
+        on_text: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         self.calls.append({"system": system, "messages": [dict(m) for m in messages], "tools": tools})
         if not self.responses:
             raise RuntimeError("ScriptedModel ran out of responses")
         nxt = self.responses.pop(0)
         out: dict[str, Any] = nxt(messages) if callable(nxt) else nxt
+        if on_text is not None:
+            for block in out.get("content") or []:
+                if block.get("type") == "text" and block.get("text"):
+                    on_text(block["text"])
         return out

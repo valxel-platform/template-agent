@@ -1,8 +1,9 @@
 # template-agent
 
-The Vrixel template for a **workflow agent**: a durable LangGraph agent that works on a task
-using the product's MCP tools, with every change approved by a person and every model call going
-through the product's LLM gateway.
+The Vrixel template for an **agent**: a durable LangGraph agent that works on tasks (runs) and
+talks with people (conversations), using the product's MCP tools, with every change approved by a
+person and every model call going through the product's LLM gateway. It runs on any number of
+replicas.
 
 The example agent turns a referral into a care-team task. Replace the prompt, the tools it may
 use and the eval cases with your own; keep the structure.
@@ -19,6 +20,10 @@ event / POST /runs
    think ── step limit ──> a person resumes or stops the run
 ```
 
+A conversation is the same machine started by each message a person sends: the agent looks
+things up for them as them, answers (streamed as it writes), and proposes changes they approve or
+decline in the conversation.
+
 ## What the template decides for you
 
 | Concern | How |
@@ -28,8 +33,10 @@ event / POST /runs
 | Acting for people | Every MCP call carries a token Keycloak exchanged (RFC 8693) for that server only, on behalf of the person behind the step: the run's starter for its steps, the approver for the changes they approved. No fixed tokens; people's tokens stay in memory, never in checkpoints (`delegation.py`). |
 | Human approval | A LangGraph interrupt. Reviewers can approve all, approve some (`approved_ids`) or reject with a note the model sees. The reviewer's identity is in the trace. |
 | Safe retries | Each approved call carries `idempotency_key = <run>:<tool_use_id>`; `POST /runs` takes an `Idempotency-Key`; events are keyed by their id. |
-| Durability | Runs are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
-| Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. |
+| Durability | Runs and conversations are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
+| Replicas | Any pod serves any request; nothing routes a caller back to the same pod. The pod that moves a thread on (a start, a message, a decision) holds the thread's Postgres advisory lock while it executes, so another pod asked to move it on at the same time answers 409 (an approval sent twice never applies twice) and every pod can say it is working. A pod that dies releases its lock with its connection; one that loses its lock connection stops before its next step (`locks.py`). |
+| Streaming | The executing pod writes progress (the reply's text as it is written, each tool step, proposals, the end of the turn) to Postgres and NOTIFYs; any pod streams it as Server-Sent Events, and a reconnect resumes from `Last-Event-ID` (`store.py`). Progress is pruned after a day; the conversation itself stays in the checkpoint. |
+| Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. A conversation's model sees its last `AGENT_CHAT_HISTORY_TURNS` exchanges, so long conversations don't grow without bound. |
 | Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. A run is visible only to whoever started it and to reviewers of the same tenant (others get 404), and nobody approves a change they asked for themselves. |
 | Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `vrixel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
 | Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
@@ -48,6 +55,25 @@ POST /runs/{id}/decision    {"decision": "approve"|"reject"|"resume"|"stop",
 ```
 
 Status is `working`, `awaiting_review`, `needs_attention`, `done`, `stopped` or `failed`.
+
+Conversations (`agent:run`; a conversation is visible only to the person who started it):
+
+```
+POST /conversations                  {"text": "...", "title": "..."}   Idempotency-Key header
+GET  /conversations                  the caller's conversations, latest first
+GET  /conversations/{id}             messages (with each answer's steps), status, waiting_for
+POST /conversations/{id}/messages    {"text": "..."}       409 while it answers or waits for a decision
+POST /conversations/{id}/decision    {"decision": "approve"|"reject"|"resume"|"stop", ...}
+GET  /conversations/{id}/stream      ?after=N or Last-Event-ID: Server-Sent Events
+```
+
+Sending answers 202 with `after`; open the stream from there. Events: `turn`, `text` (`delta`),
+`step` (`tool`, `title`, `ok`), `approval` (`actions`), `reply` (`text`), `problem`, and `idle`,
+which ends the turn and the stream. A conversation's status is `working`, `awaiting_review`,
+`needs_attention`, `idle` or `failed`. The person approves changes in their own conversation (they
+asked for them, and the changes run with their token); work that needs someone else's approval
+goes through runs. People reach conversations through the product's BFF, which relays their
+token and passes the stream through.
 
 ## Evals
 
@@ -100,7 +126,10 @@ uv run agent
 | `AGENT_ALLOW_SELF_APPROVAL` | `false` | Whether the person who asked for a change may approve it themselves |
 | `AGENT_MODEL_TIMEOUT_S` | `120` | One model call's timeout |
 | `AGENT_MAX_STEPS` | `8` | |
-| `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only) |
+| `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only: one replica, lost on restart) |
+| `AGENT_DATABASE_POOL` | `10` | Connections per replica; each thread executing on the replica holds one more (up to 8), plus one for notifications. Keep replicas x (pool + 9) under the database's connection limit |
+| `AGENT_CHAT_HISTORY_TURNS`, `AGENT_CHAT_MAX_CHARS` | `20`, `8000` | Exchanges the model sees; the longest message a person can send |
+| `AGENT_PROGRESS_RETENTION_S` | `86400` | How long streamed progress is kept |
 | `AGENT_OIDC_ISSUER`, `AGENT_OIDC_AUDIENCE`, `AGENT_OIDC_JWKS_URL` | | Required |
 | `AGENT_RUN_SCOPE`, `AGENT_REVIEW_SCOPE` | `agent:run`, `agent:review` | |
 | `AGENT_FLAGS_URL` | | The product's Flipt; unset, every feature flag reads as off |

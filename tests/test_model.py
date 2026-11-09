@@ -62,3 +62,75 @@ def test_scripted_model_runs_out() -> None:
     assert m.respond(system="", messages=[{}], tools=[], labels={})["content"][0]["text"] == "1"
     with pytest.raises(RuntimeError):
         m.respond(system="", messages=[], tools=[], labels={})
+
+
+def test_gateway_model_streams_text_as_it_is_written() -> None:
+    def sse(event: str, data: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    body = "".join(
+        [
+            sse(
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "m",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 3, "output_tokens": 0},
+                    },
+                },
+            ),
+            sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            ),
+            sse(
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}},
+            ),
+            sse(
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "lo"}},
+            ),
+            sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            sse(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 2},
+                },
+            ),
+            sse("message_stop", {"type": "message_stop"}),
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    model = GatewayModel(
+        base_url="http://gw.test",
+        api_key="k",
+        model="m",
+        max_tokens=8,
+        agent="a",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    chunks: list[str] = []
+    out = model.respond(
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        labels={"run": "r"},
+        on_text=chunks.append,
+    )
+    assert chunks == ["Hel", "lo"] and seen["body"]["stream"] is True
+    assert out["content"] == [{"type": "text", "text": "Hello"}] and out["stop_reason"] == "end_turn"

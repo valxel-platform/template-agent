@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     max_steps: int = 8  # model turns per run before a person is asked to take over
     # Durable runs: Postgres in deployed environments, in memory otherwise.
     database_url: str = ""
+    database_pool: int = 10  # connections per replica (each executing thread holds one more)
+    # Conversations: how many recent exchanges the model sees, and how long progress is kept.
+    chat_history_turns: int = 20
+    chat_max_chars: int = 8000
+    progress_retention_s: float = 86400.0
     # Who may start runs and decide approvals: OAuth 2.0 bearer tokens from the product's IdP.
     oidc_issuer: str = ""
     oidc_audience: str = ""
