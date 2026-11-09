@@ -8,6 +8,8 @@
 
 Callers present OAuth 2.0 bearer tokens from the product's IdP. Starting runs needs the run
 scope; deciding needs the review scope, and the reviewer's identity is recorded in the trace.
+A run is visible to whoever started it and to reviewers of the same tenant; anyone else gets 404.
+Reviewers can't approve changes in runs they started themselves (allow_self_approval).
 """
 
 from __future__ import annotations
@@ -87,6 +89,34 @@ def _scopes(claims: dict[str, Any]) -> set[str]:
     return set(raw.split()) if isinstance(raw, str) else set(raw)
 
 
+def tenants(claims: dict[str, Any], claim: str) -> list[str]:
+    """The caller's tenants from the token: a name, a list of names, or Keycloak's organization
+    claim (a map of organization alias to details)."""
+    raw = claims.get(claim)
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, dict):
+        return sorted(str(k) for k in raw)
+    return sorted(str(v) for v in raw)
+
+
+def owner_of(claims: dict[str, Any], claim: str) -> dict[str, Any]:
+    """What a run keeps about who started it, to decide who may see and decide it."""
+    return {"requested_by": str(claims.get("sub", "")), "tenants": tenants(claims, claim)}
+
+
+def may_see(claims: dict[str, Any], task: dict[str, Any], *, claim: str, review_scope: str) -> bool:
+    """The run's requester, or a reviewer who shares a tenant with it (or both have none)."""
+    if claims.get("sub") and claims.get("sub") == task.get("requested_by"):
+        return True
+    if review_scope not in _scopes(claims):
+        return False
+    mine, theirs = set(tenants(claims, claim)), set(task.get("tenants") or [])
+    return bool(mine & theirs) if (mine or theirs) else True
+
+
 class Runner:
     """Runs the graph in the background; one run executes at a time per id."""
 
@@ -108,6 +138,20 @@ class Runner:
         # run id -> (token of the person behind its next steps, when it expires). Memory only:
         # never in the checkpoint, so a stolen database holds no one's credentials.
         self.people: dict[str, tuple[str, float | None]] = {}
+
+    # Bounds on what the runner keeps in memory per run.
+    MAX_PEOPLE = 10_000
+    MAX_PROBLEMS = 10_000
+
+    def _prune(self) -> None:
+        """Drop expired tokens, and the oldest entries when either map is over its bound."""
+        now = time.time()
+        for run_id, (_, expires) in list(self.people.items()):
+            if expires is not None and now >= expires:
+                self.people.pop(run_id, None)
+        for held, cap in ((self.people, self.MAX_PEOPLE), (self.problems, self.MAX_PROBLEMS)):
+            while len(held) > cap:
+                held.pop(next(iter(held)))
 
     def person(self, run_id: str) -> str | None:
         held = self.people.get(run_id)
@@ -167,7 +211,9 @@ class Runner:
                 raise HTTPException(409, "This run is already working; try again when it pauses.")
             self.active.add(run_id)
             if person:
+                self.people.pop(run_id, None)  # re-inserted last: the oldest entries go first
                 self.people[run_id] = (person, delegation.unverified_expiry(person))
+            self._prune()
         fut = self.pool.submit(self._in_context, otel_context.get_current(), run_id, payload)
         if wait:
             fut.result()
@@ -206,6 +252,7 @@ def make_auditor(settings: Settings) -> Auditor:
         bootstrap=settings.audit_kafka_bootstrap,
         topic=settings.audit_topic,
         config=dict(settings.audit_kafka_config),
+        data_class=settings.data_class,
     )
     return Auditor(
         sink,
@@ -256,7 +303,10 @@ def create_app(
         model=settings.model,
         max_tokens=settings.max_tokens,
         agent=settings.name,
+        timeout_s=settings.model_timeout_s,
     )
+    if tools is None and not settings.allowed_tools:
+        log.warning("AGENT_ALLOWED_TOOLS is empty: this agent can use no tools")
     tools = tools or McpToolHost.from_settings(settings)
     verify = verifier or jwt_verifier(settings)
     graph = build_graph(
@@ -300,34 +350,50 @@ def create_app(
     can_run = Depends(caller(settings.run_scope))
     can_review = Depends(caller(settings.review_scope))
 
-    def start(key: str, task: dict[str, Any], person: str | None) -> dict[str, Any]:
+    def start(key: str, task: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
         run_id = str(uuid.uuid5(NAMESPACE, key))
-        if not runner.exists(run_id):
-            runner.start(run_id, task, wait=synchronous, person=person)
+        if runner.exists(run_id):  # a retry: the same run, if this caller may see it
+            return owned(run_id, claims)
+        runner.start(run_id, task, wait=synchronous, person=claims.get(BEARER))
         return runner.view(run_id) if runner.exists(run_id) else {"run_id": run_id, "status": "working"}
+
+    def owned(run_id: str, claims: dict[str, Any]) -> dict[str, Any]:
+        """The run's view, if this caller may see it; 404 otherwise (never saying it exists)."""
+        if not runner.exists(run_id):
+            raise HTTPException(404, "No run with this id.")
+        task = runner.graph.get_state(runner.config(run_id)).values.get("task") or {}
+        if not may_see(claims, task, claim=settings.tenant_claim, review_scope=settings.review_scope):
+            raise HTTPException(404, "No run with this id.")
+        return runner.view(run_id)
 
     @app.post("/runs", status_code=202)
     def create_run(
         body: RunRequest, claims: dict[str, Any] = can_run, idempotency_key: str = Header(default="")
     ) -> dict[str, Any]:
         key = f"{claims.get('sub', '')}:{idempotency_key}" if idempotency_key else str(uuid.uuid4())
-        return start(key, {**body.task, "requested_by": claims.get("sub", "")}, claims.get(BEARER))
+        return start(key, {**body.task, **owner_of(claims, settings.tenant_claim)}, claims)
 
     @app.post("/events", status_code=202)
     def event(body: EventRequest, claims: dict[str, Any] = can_run) -> dict[str, Any]:
         return start(
             f"event:{body.type}:{body.id}",
-            {"type": body.type, "text": body.text, **body.data, "event_id": body.id},
-            claims.get(BEARER),
+            {
+                "type": body.type,
+                "text": body.text,
+                **body.data,
+                "event_id": body.id,
+                **owner_of(claims, settings.tenant_claim),
+            },
+            claims,
         )
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: str, claims: dict[str, Any] = can_run) -> dict[str, Any]:
-        return runner.view(run_id)
+        return owned(run_id, claims)
 
     @app.post("/runs/{run_id}/decision")
     def decide(run_id: str, body: Decision, claims: dict[str, Any] = can_review) -> dict[str, Any]:
-        current = runner.view(run_id)
+        current = owned(run_id, claims)
         waiting = current["waiting_for"]
         if not waiting or current["status"] == "working":
             raise HTTPException(409, "This run is not waiting for a decision.")
@@ -338,6 +404,18 @@ def create_app(
             unknown = set(body.approved_ids) - {a["id"] for a in waiting.get("actions", [])}
             if unknown:
                 raise HTTPException(422, f"Not proposed in this run: {', '.join(sorted(unknown))}.")
+        task = runner.graph.get_state(runner.config(run_id)).values.get("task") or {}
+        requester = task.get("requested_by")
+        if (
+            waiting["type"] == "approval"
+            and body.decision == "approve"
+            and not settings.allow_self_approval
+            and requester
+            and requester == claims.get("sub")
+        ):
+            raise HTTPException(
+                403, "Someone other than the person who asked for this change must approve it."
+            )
         runner.decisions.labels(body.decision).inc()
         resume = {**body.model_dump(), "reviewer": claims.get("sub", "")}
         # An approved change runs for its approver: their token, exchanged per MCP server.

@@ -15,8 +15,11 @@ from evals.world import World
 from .conftest import CREATE, FIND, reply, text
 
 TOKENS = {
-    "runner": {"sub": "svc-intake", "scope": "agent:run"},
-    "reviewer": {"sub": "nurse-7", "scope": "agent:run agent:review"},
+    "runner": {"sub": "svc-intake", "scope": "agent:run", "organization": {"north-clinic": {}}},
+    "reviewer": {"sub": "nurse-7", "scope": "agent:run agent:review", "organization": {"north-clinic": {}}},
+    "other-runner": {"sub": "svc-billing", "scope": "agent:run", "organization": {"north-clinic": {}}},
+    "other-tenant": {"sub": "nurse-9", "scope": "agent:run agent:review", "organization": ["south-clinic"]},
+    "self-reviewer": {"sub": "nurse-8", "scope": "agent:run agent:review", "organization": "north-clinic"},
 }
 
 
@@ -207,3 +210,52 @@ def test_a_decision_that_cant_be_audited_is_not_applied(world: World, tools: Mcp
     assert (
         r.json()["status"] == "done" and r.json()["problem"] == "" and len(world.called("create_task")) == 1
     )
+
+
+def test_runs_are_visible_to_their_requester_and_reviewers_of_the_same_tenant(
+    setup: tuple[TestClient, ScriptedModel],
+) -> None:
+    client, _ = setup
+    run = client.post("/runs", json={"task": {"text": "Ana Lopez"}}, headers=auth("runner")).json()
+    rid = run["run_id"]
+    assert client.get(f"/runs/{rid}", headers=auth("runner")).status_code == 200
+    assert client.get(f"/runs/{rid}", headers=auth("reviewer")).status_code == 200
+    # Another service of the same tenant without the review scope, and a reviewer of another
+    # tenant, can't tell the run exists.
+    assert client.get(f"/runs/{rid}", headers=auth("other-runner")).status_code == 404
+    assert client.get(f"/runs/{rid}", headers=auth("other-tenant")).status_code == 404
+    denied = client.post(f"/runs/{rid}/decision", json={"decision": "approve"}, headers=auth("other-tenant"))
+    assert denied.status_code == 404
+
+
+def test_the_requester_cant_approve_their_own_change(world: World, tools: McpToolHost) -> None:
+    model = ScriptedModel([reply(FIND), reply(text("Proposing."), CREATE), reply(text("Created."))])
+    client = TestClient(
+        create_app(
+            Settings(name="intake-agent"),
+            model=model,
+            tools=tools,
+            verifier=verify,
+            checkpointer=InMemorySaver(),
+            synchronous=True,
+        )
+    )
+    run = client.post("/runs", json={"task": {"text": "Ana Lopez"}}, headers=auth("self-reviewer")).json()
+    assert run["status"] == "awaiting_review"
+    url = f"/runs/{run['run_id']}/decision"
+    r = client.post(url, json={"decision": "approve"}, headers=auth("self-reviewer"))
+    assert r.status_code == 403 and not world.called("create_task")
+    # Rejecting your own proposal is fine.
+    r = client.post(url, json={"decision": "reject"}, headers=auth("self-reviewer"))
+    assert r.status_code == 200
+
+
+def test_a_retried_event_from_another_tenant_learns_nothing(setup: tuple[TestClient, ScriptedModel]) -> None:
+    client, _ = setup
+    body = {"id": "evt-1", "type": "referral.received", "text": "Ana Lopez"}
+    assert client.post("/events", json=body, headers=auth("runner")).status_code == 202
+    assert client.post("/events", json=body, headers=auth("other-tenant")).status_code == 404
+
+
+def test_tools_are_denied_by_default() -> None:
+    assert Settings().allowed_tools == []

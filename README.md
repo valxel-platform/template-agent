@@ -30,7 +30,7 @@ event / POST /runs
 | Safe retries | Each approved call carries `idempotency_key = <run>:<tool_use_id>`; `POST /runs` takes an `Idempotency-Key`; events are keyed by their id. |
 | Durability | Runs are checkpointed in Postgres (`AGENT_DATABASE_URL`), so a run can wait days for review and survives restarts. |
 | Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. |
-| Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. |
+| Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. A run is visible only to whoever started it and to reviewers of the same tenant (others get 404), and nobody approves a change they asked for themselves. |
 | Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `vrixel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
 | Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
 | Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
@@ -95,7 +95,10 @@ uv run agent
 | `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, audience, scope}`: `audience` is the server's client in the realm |
 | `AGENT_TOKEN_URL`, `AGENT_CLIENT_ID` | | The realm's token endpoint and this agent's client, for token exchange |
 | `AGENT_CLIENT_KEY_FILE`, `AGENT_CLIENT_KEY_ID` | | `private_key_jwt` client authentication (preferred), or `AGENT_CLIENT_SECRET` |
-| `AGENT_ALLOWED_TOOLS` | `["*"]` | fnmatch patterns on `<server>__<tool>`; list tools explicitly in production |
+| `AGENT_ALLOWED_TOOLS` | `[]` | fnmatch patterns on `<server>__<tool>`. Deny by default: list each tool (or `care__*`) the agent may use |
+| `AGENT_TENANT_CLAIM` | `organization` | The token claim naming the caller's tenant: runs are visible to their requester and to reviewers of the same tenant |
+| `AGENT_ALLOW_SELF_APPROVAL` | `false` | Whether the person who asked for a change may approve it themselves |
+| `AGENT_MODEL_TIMEOUT_S` | `120` | One model call's timeout |
 | `AGENT_MAX_STEPS` | `8` | |
 | `AGENT_DATABASE_URL` | | Postgres; in memory if unset (development only) |
 | `AGENT_OIDC_ISSUER`, `AGENT_OIDC_AUDIENCE`, `AGENT_OIDC_JWKS_URL` | | Required |
@@ -103,10 +106,11 @@ uv run agent
 | `AGENT_FLAGS_URL` | | The product's Flipt; unset, every feature flag reads as off |
 | `AGENT_FLAGS_ENVIRONMENT`, `AGENT_FLAGS_NAMESPACE` | | Flipt environment (e.g. `production`) and the product's namespace (e.g. `emr`) |
 | `AGENT_FLAGS_TOKEN` | | A Flipt client token, if the product's Flipt requires one |
+| `AGENT_FLAGS_TIMEOUT_S`, `AGENT_FLAGS_CACHE_S` | `0.25`, `30` | A flag call waits at most this long; each answer (per flag, caller and attributes) is reused this long |
 | `AGENT_PRODUCT`, `AGENT_ENVIRONMENT`, `AGENT_DATA_CLASS` | | Stamped on every audit record (`data_class`: `general`, `phi` or `payments`) |
 | `AGENT_AUDIT_SINK` | `log` | `kafka` in deployed environments; `log` writes JSON lines locally |
 | `AGENT_AUDIT_KAFKA_BOOTSTRAP`, `AGENT_AUDIT_TOPIC` | `audit.v1` | The product's Kafka and its audit topic |
-| `AGENT_AUDIT_KAFKA_CONFIG` | `{}` | JSON of extra client settings (`security.protocol`, `sasl.*`) |
+| `AGENT_AUDIT_KAFKA_CONFIG` | `{}` | JSON of extra client settings (`security.protocol`, `sasl.*`). PHI and payments products must use `SSL` or `SASL_SSL`, or the agent refuses to start |
 | `AGENT_AUDIT_REQUIRED` | `true` | A decision or change whose record isn't acknowledged by Kafka is not applied |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | | Standard OpenTelemetry settings; point the endpoint at the data plane's collector |
 
