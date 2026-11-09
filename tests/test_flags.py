@@ -77,3 +77,22 @@ def test_a_test_can_set_flags_in_memory() -> None:
     flags.use_provider(InMemoryProvider({KEY: InMemoryFlag("on", {"on": True, "off": False})}))
     assert flags.enabled(KEY) is True
     flags.use_provider(NoOpProvider())
+
+
+def test_answers_are_reused_for_a_while_and_a_slow_flipt_costs_little(flipt: str) -> None:
+    flags.configure(Settings(flags_url=flipt, flags_cache_s=30))
+    assert flags.enabled(KEY, user="nurse-1") is True
+    asked = len(Flipt.seen)
+    assert flags.enabled(KEY, user="nurse-1") is True
+    assert len(Flipt.seen) == asked  # from the cache: no second request
+    assert flags.enabled(KEY, user="nurse-2") is True
+    assert len(Flipt.seen) == asked + 1  # another caller is asked for (gradual releases differ per user)
+    assert Settings().flags_timeout_s <= 0.25
+
+
+def test_the_cache_is_bounded() -> None:
+    flags.use_provider(InMemoryProvider({KEY: InMemoryFlag("on", {"on": True, "off": False})}), cache_s=30)
+    for n in range(flags._CACHE_MAX + 5):
+        flags.enabled(KEY, user=f"u{n}")
+    assert len(flags._answers.items) == flags._CACHE_MAX
+    flags.use_provider(NoOpProvider())

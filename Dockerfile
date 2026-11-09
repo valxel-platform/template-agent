@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1
 # uv builds a locked virtualenv; the runtime image has Python and the venv only, as a non-root user.
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS build
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+# Both stages use the same Python image: the venv is built for that exact Python, so the build and
+# runtime images must move together (Dependabot bumps both FROM lines in one pull request, and CI
+# starts the image to prove it runs).
+FROM python:3.13-slim-bookworm AS build
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PYTHON=/usr/local/bin/python3
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
@@ -9,7 +13,7 @@ COPY src src
 COPY README.md ./
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.15-slim-bookworm
+FROM python:3.13-slim-bookworm
 RUN useradd --uid 10001 --no-create-home app
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv

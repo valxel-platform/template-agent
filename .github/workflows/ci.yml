@@ -88,6 +88,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # OpenChoreo builds and ships the image; this only proves the Dockerfile builds on every PR.
+      # OpenChoreo builds and ships the image; this proves it builds, starts and has no known
+      # high or critical vulnerabilities with a fix available, on every PR.
       - run: docker build --pull -t ci .
+      - name: Start the image
+        run: |
+          docker run -d --name smoke -p 8080:8080 \
+            -e AGENT_GATEWAY_KEY=ci -e AGENT_OIDC_ISSUER=https://id.example.com/realms/ci \
+            -e AGENT_OIDC_AUDIENCE=ci -e AGENT_OIDC_JWKS_URL=https://id.example.com/realms/ci/certs ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then exit 0; fi
+            sleep 1
+          done
+          docker logs smoke
+          exit 1
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ci
+          format: cyclonedx-json
+          artifact-name: sbom.cyclonedx.json
+          upload-release-assets: false
+      - uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ci
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
 

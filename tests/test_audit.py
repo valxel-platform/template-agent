@@ -126,3 +126,20 @@ def test_sinks_are_chosen_by_name(caplog: pytest.LogCaptureFixture) -> None:
     with pytest.raises(RuntimeError, match="Unknown"):
         make_sink("syslog")
     assert isinstance(make_sink("kafka", bootstrap="127.0.0.1:9", topic="t"), KafkaSink)
+
+
+def test_phi_audit_records_never_travel_in_plain_text() -> None:
+    import pytest
+
+    from agent.audit import make_sink
+
+    with pytest.raises(RuntimeError, match="must use TLS"):
+        make_sink("kafka", bootstrap="kafka:9092", topic="audit.v1", data_class="phi")
+    with pytest.raises(RuntimeError, match="must use TLS"):
+        make_sink(
+            "kafka",
+            bootstrap="kafka:9092",
+            topic="audit.v1",
+            data_class="payments",
+            config={"security.protocol": "SASL_PLAINTEXT"},
+        )

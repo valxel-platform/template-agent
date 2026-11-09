@@ -204,12 +204,32 @@ class Auditor:
         return event
 
 
+# Data classes whose audit records must travel encrypted (they name people and records).
+ENCRYPTED_CLASSES = ("phi", "payments")
+
+
+def require_encryption(config: dict[str, Any] | None, data_class: str, what: str = "audit") -> None:
+    """PHI and payments products never talk to Kafka in plain text: refuse to start instead."""
+    protocol = str((config or {}).get("security.protocol", "PLAINTEXT")).upper()
+    if data_class in ENCRYPTED_CLASSES and protocol not in ("SSL", "SASL_SSL"):
+        raise RuntimeError(
+            f"The {what} Kafka connection of a {data_class} product must use TLS: set security.protocol "
+            f"to SSL or SASL_SSL (it is {protocol})"
+        )
+
+
 def make_sink(
-    kind: str, *, bootstrap: str = "", topic: str = "", config: dict[str, Any] | None = None
+    kind: str,
+    *,
+    bootstrap: str = "",
+    topic: str = "",
+    config: dict[str, Any] | None = None,
+    data_class: str = "general",
 ) -> Sink:
     if kind == "kafka":
         if not (bootstrap and topic):
             raise RuntimeError("The kafka audit sink needs a bootstrap server and a topic")
+        require_encryption(config, data_class)
         return KafkaSink(bootstrap, topic, config=config)
     if kind == "log":
         return LogSink()

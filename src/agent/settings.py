@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     gateway_key: str = ""
     model: str = "claude-sonnet-5-5"
     max_tokens: int = 2048
+    model_timeout_s: float = 120.0  # one model call; the SDK's default is 10 minutes
     # Tools: MCP servers this agent may use, and which of their tools (fnmatch patterns).
     mcp_servers: list[McpServer] = Field(default_factory=list)
-    allowed_tools: list[str] = Field(default_factory=lambda: ["*"])
+    # Deny by default: list each tool (or a server's tools, "care__*") this agent may use. Read
+    # tools run by themselves; anything else waits for a person's approval.
+    allowed_tools: list[str] = Field(default_factory=list)
     # Guardrails
     max_steps: int = 8  # model turns per run before a person is asked to take over
     # Durable runs: Postgres in deployed environments, in memory otherwise.
@@ -58,5 +61,12 @@ class Settings(BaseSettings):
     flags_environment: str = ""  # Flipt environment, e.g. production (header x-flipt-environment)
     flags_namespace: str = ""  # the product's Flipt namespace, e.g. emr
     flags_token: str = ""  # a Flipt client token, if the product's Flipt requires authentication
+    flags_timeout_s: float = 0.25  # a slow Flipt never slows a step down by more than this
+    flags_cache_s: float = 30.0  # how long a flag's answer for a caller is reused
     run_scope: str = "agent:run"
     review_scope: str = "agent:review"
+    # Who may see and decide a run: the person or service that started it, and reviewers of the
+    # same tenant (the token claim naming the caller's organization; Keycloak organizations).
+    tenant_claim: str = "organization"
+    # Separation of duties: the person who asked for a change can't approve it themselves.
+    allow_self_approval: bool = False

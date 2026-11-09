@@ -23,12 +23,20 @@ class Model(Protocol):
 
 class GatewayModel:
     def __init__(
-        self, *, base_url: str, api_key: str, model: str, max_tokens: int, agent: str, http_client: Any = None
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        max_tokens: int,
+        agent: str,
+        http_client: Any = None,
+        timeout_s: float = 120.0,
     ) -> None:
         if not api_key:
             raise ValueError("AGENT_GATEWAY_KEY is required")
         self.client = anthropic.Anthropic(
-            base_url=base_url, api_key=api_key, max_retries=3, http_client=http_client
+            base_url=base_url, api_key=api_key, max_retries=3, http_client=http_client, timeout=timeout_s
         )
         self.model = model
         self.max_tokens = max_tokens
