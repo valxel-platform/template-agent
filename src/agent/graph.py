@@ -9,6 +9,14 @@
     think ──(no tools)──> done               the model's summary is the result
     think ──(step limit)──> escalate ── interrupt: a person resumes or stops the run
 
+A conversation is the same machine with `listen` in place of `start`: each message a person
+sends enters at `listen`, joins the conversation's history and runs the loop above until the
+agent answers (or proposes a change, which the person approves or declines in the conversation).
+The model sees the last `history_turns` exchanges, so a long conversation's cost stays bounded.
+While a thread executes it reports what it does through `emit` (store.py): the answer's text as
+it is written, each tool step, proposals, the answer. Before each step the executing replica
+confirms it still holds the thread's lock (locks.py).
+
 Runs are durable: with a Postgres checkpointer a run survives restarts and can wait days for a
 review. Every model turn, tool call and decision is in the run's trace (for evals and the API).
 
@@ -22,6 +30,7 @@ token counts and tool names but never prompt or result text.
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib.resources import files
 from typing import Annotated, Any, Literal, TypedDict
@@ -30,6 +39,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.types import Command, interrupt
 from opentelemetry import trace as otel
 
+from . import locks
 from .audit import Actor, Auditor, MemorySink
 from .model import Model
 from .tools import Tool, ToolError, ToolHost
@@ -49,6 +59,9 @@ class RunState(TypedDict, total=False):
     status: str  # running | awaiting_review | needs_attention | done | stopped
     result: str
     trace: Annotated[list[dict[str, Any]], operator.add]
+    kind: str  # run | conversation
+    message: str  # a conversation: the person's latest message
+    turn: int  # a conversation: how many messages the person has sent
 
 
 def _blocks(content: Any) -> list[dict[str, Any]]:
@@ -82,8 +95,41 @@ def _tool_result(tool_use_id: str, content: str, error: bool = False) -> dict[st
     return out
 
 
-def system_prompt(product: str) -> str:
-    return files("agent").joinpath("prompts/system.md").read_text().format(product=product)
+def system_prompt(product: str, name: str = "system") -> str:
+    return files("agent").joinpath(f"prompts/{name}.md").read_text().format(product=product)
+
+
+Emit = Callable[[str, str, dict[str, Any]], Any]
+
+
+def window(messages: list[dict[str, Any]], turns: int) -> list[dict[str, Any]]:
+    """The last `turns` exchanges of a conversation: from the person's message that began the
+    oldest of them (a turn always starts with their text, so tool calls are never split)."""
+    starts = [i for i, m in enumerate(messages) if m["role"] == "user" and isinstance(m["content"], str)]
+    return messages[starts[-turns] :] if len(starts) > turns else messages
+
+
+class TextBatcher:
+    """Text as the model writes it, in a few lines a second rather than one per token."""
+
+    def __init__(self, emit: Emit, thread: str, every_s: float = 0.15, size: int = 200) -> None:
+        self.emit, self.thread, self.every_s, self.size = emit, thread, every_s, size
+        self.buf: list[str] = []
+        self.at = 0.0
+
+    def __call__(self, chunk: str) -> None:
+        import time
+
+        self.buf.append(chunk)
+        now = time.monotonic()
+        if sum(map(len, self.buf)) >= self.size or now - self.at >= self.every_s:
+            self.flush()
+            self.at = now
+
+    def flush(self) -> None:
+        if self.buf:
+            self.emit(self.thread, "text", {"delta": "".join(self.buf)})
+            self.buf = []
 
 
 tracer = otel.get_tracer("agent")
@@ -97,9 +143,20 @@ def build_graph(
     checkpointer: Any = None,
     auditor: Auditor | None = None,
     agent: str = "agent",
+    emit: Emit | None = None,
+    mode: Literal["run", "conversation"] = "run",
+    history_turns: int = 20,
 ) -> Any:
     audit = auditor or Auditor(MemorySink(), service=agent)
     me = Actor(id=agent, type="agent")
+    prompt = "system" if mode == "run" else "chat"
+
+    def say(thread: str, kind: str, **data: Any) -> None:
+        if emit is not None:
+            emit(thread, kind, data)
+
+    def resource(state: RunState) -> tuple[str, list[str]]:
+        return ("conversation" if mode == "conversation" else "run", [state["run_id"]])
 
     def catalog() -> dict[str, Tool]:
         return {t.name: t for t in tools.tools()}
@@ -123,7 +180,14 @@ def build_graph(
             span.set_attribute("gen_ai.conversation.id", kw["labels"]["run"])
             if name:
                 span.set_attribute("gen_ai.request.model", name)
-            reply = model.respond(**kw)
+            if emit is None:
+                reply = model.respond(**kw)
+            else:
+                text = TextBatcher(emit, kw["labels"]["run"])
+                try:
+                    reply = model.respond(**kw, on_text=text)
+                finally:
+                    text.flush()
             usage = reply.get("usage") or {}
             for attr, k in (
                 ("gen_ai.usage.input_tokens", "input_tokens"),
@@ -150,11 +214,13 @@ def build_graph(
                 out = call_tool(known[c["name"]], c.get("input") or {}, f"{run_id}:{c['id']}")
                 results.append(_tool_result(c["id"], out))
                 trace.append(_event("tool_call", tool=c["name"], input=c.get("input"), ok=True))
+                say(run_id, "step", tool=c["name"], title=step_title(known[c["name"]]), ok=True)
             except ToolError as exc:
                 results.append(_tool_result(c["id"], str(exc), error=True))
                 trace.append(
                     _event("tool_call", tool=c["name"], input=c.get("input"), ok=False, error=str(exc))
                 )
+                say(run_id, "step", tool=c["name"], title=step_title(known[c["name"]]), ok=False)
         return results, trace
 
     def start(state: RunState) -> dict[str, Any]:
@@ -166,24 +232,49 @@ def build_graph(
             actor=Actor(id=who, type="user")
             if who
             else Actor(id=str(task.get("event_id") or "event"), type="service"),
-            resource=("run", [state["run_id"]]),
+            resource=resource(state),
             details={"task_type": str(task.get("type", ""))},
         )
+        say(state["run_id"], "turn", turn=1)
         return {
             "messages": [{"role": "user", "content": text}],
             "steps": 0,
             "status": "running",
+            "kind": "run",
             "trace": [_event("started", task_type=task.get("type", ""))],
         }
 
+    def listen(state: RunState) -> dict[str, Any]:
+        """A person's message in a conversation: the next turn begins."""
+        turn = state.get("turn", 0) + 1
+        audit.record(
+            "agent.chat.message",
+            actor=Actor(id=requester(state), type="user"),
+            resource=resource(state),
+            details={"turn": turn, "chars": len(state.get("message") or "")},
+        )
+        say(state["run_id"], "turn", turn=turn, text=state.get("message") or "")
+        return {
+            "messages": [{"role": "user", "content": state.get("message") or ""}],
+            "steps": 0,
+            "turn": turn,
+            "status": "running",
+            "result": "",
+            "kind": "conversation",
+            "trace": [_event("message", turn=turn)],
+        }
+
     def think(state: RunState) -> Command[Literal["think", "review", "escalate", "__end__"]]:
+        locks.check()
         steps = state.get("steps", 0)
         if steps >= state.get("max_steps", 8):
             return Command(goto="escalate")
         known = catalog()
         reply = respond(
-            system=system_prompt(product),
-            messages=state["messages"],
+            system=system_prompt(product, prompt),
+            messages=window(state["messages"], history_turns)
+            if mode == "conversation"
+            else state["messages"],
             tools=[t.definition() for t in known.values()],
             labels={"run": state["run_id"]},
         )
@@ -207,6 +298,7 @@ def build_graph(
         base = {"steps": steps + 1, "messages": [assistant]}
         if not calls:
             text = "".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
+            say(state["run_id"], "reply", text=text)
             return Command(
                 goto="__end__",
                 update={**base, "status": "done", "result": text, "trace": [*trace, _event("done")]},
@@ -218,6 +310,19 @@ def build_graph(
         ]
         trace += read_trace + [_event("tool_refused", tool=c["name"]) for c in unknown]
         if writes:
+            say(
+                state["run_id"],
+                "approval",
+                actions=[
+                    {
+                        "id": w["id"],
+                        "tool": w["name"],
+                        "input": w.get("input"),
+                        "title": step_title(known[w["name"]]),
+                    }
+                    for w in writes
+                ],
+            )
             return Command(
                 goto="review",
                 update={
@@ -260,7 +365,7 @@ def build_graph(
         audit.record(
             f"agent.change.{'approve' if decision['decision'] == 'approve' else 'reject'}",
             actor=Actor(id=str(decision.get("reviewer") or ""), type="user"),
-            resource=("run", [state["run_id"]]),
+            resource=resource(state),
             on_behalf_of=requester(state),
             details={
                 "approved": [w["name"] for w in pending if _approved(decision, w["id"])],
@@ -285,6 +390,7 @@ def build_graph(
         )
 
     def act(state: RunState) -> Command[Literal["think"]]:
+        locks.check()
         known = catalog()
         results = list(state.get("read_results") or [])
         trace = []
@@ -304,18 +410,20 @@ def build_graph(
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=True, approved=True)
                 )
+                say(state["run_id"], "step", tool=w["name"], title=step_title(known[w["name"]]), ok=True)
             except ToolError as exc:
                 outcome, reason = "failure", "the tool refused the change"
                 results.append(_tool_result(w["id"], str(exc), error=True))
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=False, error=str(exc))
                 )
+                say(state["run_id"], "step", tool=w["name"], title=step_title(known[w["name"]]), ok=False)
             # The MCP server audits the records it changed; this ties the change to the run,
             # the person it was done for and the approval.
             audit.record(
                 "agent.change.apply",
                 actor=me,
-                resource=("run", [state["run_id"]]),
+                resource=resource(state),
                 outcome=outcome,  # type: ignore[arg-type]
                 reason=reason,
                 # The change ran with its approver's delegated token, so it was done for them.
@@ -347,7 +455,7 @@ def build_graph(
         audit.record(
             f"agent.run.{decision['decision']}",
             actor=Actor(id=str(decision.get("reviewer") or ""), type="user"),
-            resource=("run", [state["run_id"]]),
+            resource=resource(state),
             on_behalf_of=requester(state),
         )
         if decision["decision"] == "stop":
@@ -371,14 +479,21 @@ def build_graph(
         )
 
     g = StateGraph(RunState)
-    g.add_node("start", start)
+    entry = "start" if mode == "run" else "listen"
+    g.add_node(entry, start if mode == "run" else listen)
     g.add_node("think", think)
     g.add_node("review", review)
     g.add_node("act", act)
     g.add_node("escalate", escalate)
-    g.add_edge(START, "start")
-    g.add_edge("start", "think")
-    return g.compile(checkpointer=checkpointer, name="agent")
+    g.add_edge(START, entry)
+    g.add_edge(entry, "think")
+    return g.compile(checkpointer=checkpointer, name="agent" if mode == "run" else "chat")
+
+
+def step_title(tool: Tool) -> str:
+    """What a person sees for a step: the first sentence of the tool's description."""
+    first = (tool.description or tool.remote_name).strip().split("\n", 1)[0]
+    return first.split(". ", 1)[0].rstrip(".")[:120]
 
 
 class InvalidDecision(ValueError):

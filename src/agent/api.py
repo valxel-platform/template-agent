@@ -4,6 +4,7 @@
   POST /events                 start a run from an event source (the event id is the idempotency key)
   GET  /runs/{id}              status, result, what is waiting for review, and the trace
   POST /runs/{id}/decision     approve or reject proposed changes; resume or stop a stalled run
+  /conversations ...           a person talking with the agent (chat.py)
   GET  /healthz /readyz /metrics
 
 Callers present OAuth 2.0 bearer tokens from the product's IdP. Starting runs needs the run
@@ -14,11 +15,12 @@ Reviewers can't approve changes in runs they started themselves (allow_self_appr
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -30,11 +32,21 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import cohorts, delegation, errors, flags, telemetry
+from . import chat, cohorts, delegation, errors, flags, locks, telemetry
 from .audit import Auditor, AuditUnavailable, make_sink
+from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
+from .locks import Lease, LeaseLost, Locks, MemoryLocks, PostgresLocks
 from .model import GatewayModel, Model
 from .settings import Settings
+from .store import (
+    Conversations,
+    MemoryConversations,
+    MemoryProgress,
+    PostgresConversations,
+    PostgresProgress,
+    Progress,
+)
 from .tools import McpToolHost, ToolHost
 
 log = logging.getLogger("agent")
@@ -118,15 +130,28 @@ def may_see(claims: dict[str, Any], task: dict[str, Any], *, claim: str, review_
 
 
 class Runner:
-    """Runs the graph in the background; one run executes at a time per id."""
+    """Runs threads (runs and conversations) in the background, one step at a time per thread
+    across every replica: the pod that moves a thread on holds its lock (locks.py) and reports
+    what happens as it happens (store.py), so any pod can answer for it."""
 
-    def __init__(self, graph: Any, max_steps: int, workers: int = 8, name: str = "agent") -> None:
+    def __init__(
+        self,
+        graph: Any,
+        max_steps: int,
+        workers: int = 8,
+        name: str = "agent",
+        *,
+        chat: Any = None,
+        locks: Locks | None = None,
+        progress: Progress | None = None,
+    ) -> None:
         self.graph = graph
+        self.chat = chat
         self.name = name
-        self.problems: dict[str, str] = {}  # run id -> why its last step didn't complete
         self.max_steps = max_steps
+        self.locks: Locks = locks or MemoryLocks()
+        self.progress: Progress = progress or MemoryProgress()
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="run")
-        self.active: set[str] = set()
         self.lock = threading.Lock()
         self.registry = CollectorRegistry()
         self.started = Counter("agent_runs_started", "Runs started", registry=self.registry)
@@ -135,50 +160,62 @@ class Runner:
         )
         self.decisions = Counter("agent_decisions", "Review decisions", ["decision"], registry=self.registry)
         self.errors = Counter("agent_run_errors", "Runs that raised", registry=self.registry)
-        # run id -> (token of the person behind its next steps, when it expires). Memory only:
-        # never in the checkpoint, so a stolen database holds no one's credentials.
+        self.messages = Counter("agent_chat_messages", "Messages people sent", registry=self.registry)
+        # thread id -> (token of the person behind its next steps, when it expires). Memory only,
+        # on the pod that executes those steps (the one that received the request): never in the
+        # checkpoint, so a stolen database holds no one's credentials.
         self.people: dict[str, tuple[str, float | None]] = {}
 
-    # Bounds on what the runner keeps in memory per run.
+    # Bounds on what the runner keeps in memory per thread.
     MAX_PEOPLE = 10_000
-    MAX_PROBLEMS = 10_000
 
     def _prune(self) -> None:
-        """Drop expired tokens, and the oldest entries when either map is over its bound."""
+        """Drop expired tokens, and the oldest when there are too many."""
         now = time.time()
-        for run_id, (_, expires) in list(self.people.items()):
+        for thread, (_, expires) in list(self.people.items()):
             if expires is not None and now >= expires:
-                self.people.pop(run_id, None)
-        for held, cap in ((self.people, self.MAX_PEOPLE), (self.problems, self.MAX_PROBLEMS)):
-            while len(held) > cap:
-                held.pop(next(iter(held)))
+                self.people.pop(thread, None)
+        while len(self.people) > self.MAX_PEOPLE:
+            self.people.pop(next(iter(self.people)))
 
-    def person(self, run_id: str) -> str | None:
-        held = self.people.get(run_id)
+    def person(self, thread: str) -> str | None:
+        held = self.people.get(thread)
         if not held:
             return None
         token, expires = held
         if expires is not None and time.time() >= expires:
-            self.people.pop(run_id, None)
+            self.people.pop(thread, None)
             return None
         return token
 
+    def graph_for(self, thread: str) -> Any:
+        return self.chat if thread.startswith(CONVERSATION) and self.chat is not None else self.graph
+
     @staticmethod
-    def config(run_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": run_id}}
+    def config(thread: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": thread}}
 
-    def exists(self, run_id: str) -> bool:
-        return bool(self.graph.get_state(self.config(run_id)).values)
+    def state(self, thread: str) -> Any:
+        return self.graph_for(thread).get_state(self.config(thread))
 
-    def _in_context(self, ctx: Any, run_id: str, payload: Any) -> None:
+    def exists(self, thread: str) -> bool:
+        return bool(self.state(thread).values)
+
+    def _in_context(self, ctx: Any, thread: str, payload: Any, lease: Lease) -> None:
         """Runs on a worker thread, inside the trace of the request that started or resumed it."""
         token = otel_context.attach(ctx)
         try:
-            self._execute(run_id, payload)
+            self._execute(thread, payload, lease)
         finally:
             otel_context.detach(token)
 
-    def _execute(self, run_id: str, payload: Any) -> None:
+    def _problem(self, thread: str, text: str) -> None:
+        try:
+            self.progress.emit(thread, "problem", {"text": text})
+        except Exception:
+            log.exception("could not record the outcome of %s", thread)
+
+    def _execute(self, thread: str, payload: Any, lease: Lease) -> None:
         tracer = trace.get_tracer("agent")
         try:
             with tracer.start_as_current_span(
@@ -186,62 +223,83 @@ class Runner:
             ) as span:
                 span.set_attribute("gen_ai.operation.name", "invoke_agent")
                 span.set_attribute("gen_ai.agent.name", self.name)
-                span.set_attribute("gen_ai.conversation.id", run_id)
-                with delegation.acting_for(self.person(run_id)):
-                    self.graph.invoke(payload, self.config(run_id))
-            self.problems.pop(run_id, None)
-            self.finished.labels(self.view(run_id)["status"]).inc()
+                span.set_attribute("gen_ai.conversation.id", thread)
+                with delegation.acting_for(self.person(thread)), locks.holding(lease):
+                    self.graph_for(thread).invoke(payload, self.config(thread))
+            self._problem(thread, "")
+            self.finished.labels(self.view(thread, working=False)["status"]).inc()
+        except LeaseLost:
+            # Another replica may be carrying the thread on; it reports from here.
+            log.warning("%s: this replica lost the thread's lock and stopped", thread)
         except AuditUnavailable:
             self.errors.inc()
-            self.problems[run_id] = (
-                "The audit trail is unavailable, so the last step was not done. Try again."
-            )
-            log.exception("run %s stopped: audit trail unavailable", run_id)
+            self._problem(thread, "The audit trail is unavailable, so the last step was not done. Try again.")
+            log.exception("%s stopped: audit trail unavailable", thread)
         except Exception:
             self.errors.inc()
-            self.problems[run_id] = "The last step failed; see the service logs."
-            log.exception("run %s failed", run_id)
+            self._problem(thread, "The last step failed; see the service logs.")
+            log.exception("%s failed", thread)
         finally:
-            with self.lock:
-                self.active.discard(run_id)
+            lease.release()
+            try:
+                self.progress.emit(thread, "idle", {"status": self.view(thread, working=False)["status"]})
+            except Exception:
+                log.exception("could not report %s idle", thread)
 
-    def submit(self, run_id: str, payload: Any, wait: bool = False, person: str | None = None) -> None:
-        with self.lock:
-            if run_id in self.active:
-                raise HTTPException(409, "This run is already working; try again when it pauses.")
-            self.active.add(run_id)
-            if person:
-                self.people.pop(run_id, None)  # re-inserted last: the oldest entries go first
-                self.people[run_id] = (person, delegation.unverified_expiry(person))
-            self._prune()
-        fut = self.pool.submit(self._in_context, otel_context.get_current(), run_id, payload)
+    def submit(
+        self, thread: str, payload: Any, wait: bool = False, person: str | None = None, fresh: bool = False
+    ) -> bool:
+        """Move a thread on, on this pod. 409 when another request is moving it on (here or on
+        another pod). `fresh`: only if it doesn't exist yet (a start); False when it does."""
+        lease = self.locks.acquire(thread)
+        if lease is None:
+            raise HTTPException(409, "This is already working; try again when it pauses.")
+        try:
+            if fresh and self.exists(thread):
+                lease.release()
+                return False
+            with self.lock:
+                if person:
+                    self.people.pop(thread, None)  # re-inserted last: the oldest entries go first
+                    self.people[thread] = (person, delegation.unverified_expiry(person))
+                self._prune()
+            fut = self.pool.submit(self._in_context, otel_context.get_current(), thread, payload, lease)
+        except BaseException:
+            lease.release()
+            raise
         if wait:
             fut.result()
+        return True
 
-    def start(self, run_id: str, task: dict[str, Any], wait: bool = False, person: str | None = None) -> None:
-        self.started.inc()
-        self.submit(run_id, {"run_id": run_id, "task": task, "max_steps": self.max_steps}, wait, person)
+    def start(self, run_id: str, task: dict[str, Any], wait: bool = False, person: str | None = None) -> bool:
+        started = self.submit(
+            run_id, {"run_id": run_id, "task": task, "max_steps": self.max_steps}, wait, person, fresh=True
+        )
+        if started:
+            self.started.inc()
+        return started
 
-    def view(self, run_id: str) -> dict[str, Any]:
-        snap = self.graph.get_state(self.config(run_id))
+    def view(self, run_id: str, working: bool | None = None) -> dict[str, Any]:
+        snap = self.state(run_id)
         if not snap.values:
             raise HTTPException(404, "No run with this id.")
         v = snap.values
         waiting = [i.value for i in getattr(snap, "interrupts", ()) or ()]
-        with self.lock:
-            working = run_id in self.active
+        if working is None:
+            working = self.locks.busy(run_id)
         status = "working" if working else v.get("status", "running")
         if not working and not waiting and status in ("running", "awaiting_review"):
             status = "failed"  # the last attempt raised; see the logs and the trace
         if waiting and not working:
             status = "needs_attention" if waiting[0].get("type") == "takeover" else "awaiting_review"
+        problem = self.progress.latest(run_id, ("problem",))
         return {
             "run_id": run_id,
             "status": status,
             "result": v.get("result", ""),
             "waiting_for": waiting[0] if waiting else None,
             "steps": v.get("steps", 0),
-            "problem": self.problems.get(run_id, ""),
+            "problem": (problem or {}).get("data", {}).get("text", ""),
             "trace": v.get("trace", []),
         }
 
@@ -264,24 +322,38 @@ def make_auditor(settings: Settings) -> Auditor:
     )
 
 
-def make_checkpointer(settings: Settings) -> Any:
-    if not settings.database_url:
-        from langgraph.checkpoint.memory import InMemorySaver
+class Database:
+    """Where threads are kept and coordinated: Postgres in deployed environments (any number of
+    replicas), memory otherwise (one process, lost on restart)."""
 
-        log.warning("AGENT_DATABASE_URL is not set: runs are kept in memory and lost on restart")
-        return InMemorySaver()
-    from langgraph.checkpoint.postgres import PostgresSaver
-    from psycopg.rows import dict_row
-    from psycopg_pool import ConnectionPool
+    def __init__(self, settings: Settings, checkpointer: Any = None) -> None:
+        self.pool: Any = None
+        if not settings.database_url:
+            from langgraph.checkpoint.memory import InMemorySaver
 
-    pool = ConnectionPool(
-        settings.database_url,
-        max_size=10,
-        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-    )
-    saver = PostgresSaver(pool)  # type: ignore[arg-type]
-    saver.setup()
-    return saver
+            if checkpointer is None:
+                log.warning("AGENT_DATABASE_URL is not set: runs are kept in memory and lost on restart")
+            self.checkpointer = checkpointer or InMemorySaver()
+            self.locks: Locks = MemoryLocks()
+            self.progress: Progress = MemoryProgress()
+            self.conversations: Conversations = MemoryConversations()
+            return
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        self.pool = ConnectionPool(
+            settings.database_url,
+            max_size=settings.database_pool,
+            open=True,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
+        saver = PostgresSaver(self.pool)
+        saver.setup()
+        self.checkpointer = checkpointer or saver
+        self.locks = PostgresLocks(settings.database_url, self.pool, settings.name)
+        self.progress = PostgresProgress(self.pool, settings.database_url)
+        self.conversations = PostgresConversations(self.pool)
 
 
 def create_app(
@@ -309,16 +381,32 @@ def create_app(
         log.warning("AGENT_ALLOWED_TOOLS is empty: this agent can use no tools")
     tools = tools or McpToolHost.from_settings(settings)
     verify = verifier or jwt_verifier(settings)
-    graph = build_graph(
-        model=model,
-        tools=tools,
-        product=settings.name,
-        checkpointer=checkpointer or make_checkpointer(settings),
-        auditor=auditor or make_auditor(settings),
-        agent=settings.name,
+    db = Database(settings, checkpointer)
+    auditor = auditor or make_auditor(settings)
+    common: dict[str, Any] = {
+        "model": model,
+        "tools": tools,
+        "product": settings.name,
+        "checkpointer": db.checkpointer,
+        "auditor": auditor,
+        "agent": settings.name,
+        "emit": db.progress.emit,
+    }
+    graph = build_graph(**common)
+    conversation = build_graph(**common, mode="conversation", history_turns=settings.chat_history_turns)
+    runner = Runner(
+        graph, settings.max_steps, name=settings.name, chat=conversation, locks=db.locks, progress=db.progress
     )
-    runner = Runner(graph, settings.max_steps, name=settings.name)
-    app = FastAPI(title=settings.name, version="0.1.0")
+    chat.start_pruning(db.progress, settings.progress_retention_s)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        yield
+        runner.pool.shutdown(wait=False)
+        if db.pool is not None:
+            db.pool.close()
+
+    app = FastAPI(title=settings.name, version="0.1.0", lifespan=lifespan)
     # Each response names its trace (traceresponse); errors go to Sentry when SENTRY_DSN is set.
     app.add_middleware(errors.TraceResponseMiddleware)
     # Requests per flag, on and off, for the SDLC tool's gradual releases (logged once a minute).
@@ -354,7 +442,15 @@ def create_app(
         run_id = str(uuid.uuid5(NAMESPACE, key))
         if runner.exists(run_id):  # a retry: the same run, if this caller may see it
             return owned(run_id, claims)
-        runner.start(run_id, task, wait=synchronous, person=claims.get(BEARER))
+        try:
+            started = runner.start(run_id, task, wait=synchronous, person=claims.get(BEARER))
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            # The same start is being handled right now (here or on another replica).
+            return {"run_id": run_id, "status": "working"}
+        if not started:
+            return owned(run_id, claims)
         return runner.view(run_id) if runner.exists(run_id) else {"run_id": run_id, "status": "working"}
 
     def owned(run_id: str, claims: dict[str, Any]) -> dict[str, Any]:
@@ -421,6 +517,8 @@ def create_app(
         # An approved change runs for its approver: their token, exchanged per MCP server.
         runner.submit(run_id, Command(resume=resume), wait=synchronous, person=claims.get(BEARER))
         return runner.view(run_id)
+
+    chat.routes(app, runner, db.conversations, tools, settings, can_run, synchronous)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
