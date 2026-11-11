@@ -3,6 +3,8 @@
   python -m evals.run                     replay recorded model responses (CI, every PR: offline, free)
   python -m evals.run --live              the real model through the LLM gateway (post-deploy in dev)
   python -m evals.run --live --record     ... and save the responses as the new recordings
+  python -m evals.run --live --variant small     one prompt and model variant (variants.toml)
+  python -m evals.run --live --all-variants      every variant, one test suite each (post-deploy)
 
 Each case runs against the in-memory world, with a scripted reviewer, and is graded on what the
 agent did. Replay catches regressions in the graph, prompts' plumbing and graders; live runs catch
@@ -29,6 +31,8 @@ from agent.graph import build_graph
 from agent.model import GatewayModel, Model, ScriptedModel
 from agent.settings import Settings
 from agent.tools import McpToolHost
+from agent.variants import DEFAULT
+from agent.variants import load as load_variants
 
 from .graders import grade
 from .world import ALLOWED_TOOLS, World
@@ -51,10 +55,14 @@ def load_cases(only: str | None = None) -> list[dict[str, Any]]:
     return [c for c in cases if not only or c["id"] == only]
 
 
-def run_case(case: dict[str, Any], model: Model, max_steps: int = 8) -> tuple[dict[str, Any], World]:
+def run_case(
+    case: dict[str, Any], model: Model, max_steps: int = 8, variant: str | None = None
+) -> tuple[dict[str, Any], World]:
     world = World()
     tools = McpToolHost({"care": world.server}, ALLOWED_TOOLS)
-    graph = build_graph(model=model, tools=tools, product="the care team", checkpointer=InMemorySaver())
+    graph = build_graph(
+        model=model, tools=tools, product="the care team", checkpointer=InMemorySaver(), variant=variant
+    )
     cfg = {"configurable": {"thread_id": case["id"]}}
     graph.invoke({"run_id": case["id"], "task": case["task"], "max_steps": max_steps}, cfg)
     for _ in range(10):
@@ -79,52 +87,73 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--record", action="store_true")
     ap.add_argument("--case")
+    ap.add_argument("--variant", help="run with this prompt and model variant (variants.toml)")
+    ap.add_argument("--all-variants", action="store_true", help="every variant, one test suite each (--live)")
     ap.add_argument("--junit", default="reports/evals.xml")
     ap.add_argument("--perf", help="write turns, seconds and tokens per case as JSON here")
     args = ap.parse_args(argv)
+    known = load_variants()
+    names = sorted(known) if args.all_variants else [args.variant or DEFAULT]
+    if (args.all_variants or (args.variant and args.variant != DEFAULT)) and not args.live:
+        ap.error("variants other than default need --live: the recordings are the default variant's")
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        ap.error(f"no variant {', '.join(unknown)} in variants.toml")
 
-    suite = ET.Element("testsuite", name="evals")
-    failed = 0
+    suites = ET.Element("testsuites")
+    failed_total = 0
     turns: list[int] = []
     seconds: list[float] = []
     tokens: list[int] = []
-    for case in load_cases(args.case):
-        cassette = HERE / "cassettes" / f"{case['id']}.json"
-        if args.live:
-            s = Settings()
-            model: Any = Recorder(
-                GatewayModel(
-                    base_url=s.gateway_url,
-                    api_key=s.gateway_key,
-                    model=s.model,
-                    max_tokens=s.max_tokens,
-                    agent=f"{s.name}-evals",
+    for name in names:
+        suite = ET.SubElement(suites, "testsuite", name="evals" if name == DEFAULT else f"evals[{name}]")
+        failed = 0
+        for case in load_cases(args.case):
+            cassette = HERE / "cassettes" / f"{case['id']}.json"
+            if args.live:
+                s = Settings()
+                model: Any = Recorder(
+                    GatewayModel(
+                        base_url=s.gateway_url,
+                        api_key=s.gateway_key,
+                        model=s.model,
+                        max_tokens=s.max_tokens,
+                        agent=f"{s.name}-evals",
+                    )
                 )
+            else:
+                model = ScriptedModel(json.loads(cassette.read_text()))
+            started = time.monotonic()
+            try:
+                run, world = run_case(case, model, variant=name)
+                fails = grade(case, run, world)
+                used = model.responses if isinstance(model, Recorder) else _consumed(cassette, model)
+                turns.append(len(used))
+                tokens.append(sum(_tokens(r) for r in used))
+            except Exception as exc:  # noqa: BLE001  (a crash is a failed case, not a failed suite)
+                fails = [f"{type(exc).__name__}: {exc}"]
+            seconds.append(time.monotonic() - started)
+            tc = ET.SubElement(
+                suite,
+                "testcase",
+                classname=suite.get("name", "evals"),
+                name=case["id"],
+                time=f"{seconds[-1]:.3f}",
             )
-        else:
-            model = ScriptedModel(json.loads(cassette.read_text()))
-        started = time.monotonic()
-        try:
-            run, world = run_case(case, model)
-            fails = grade(case, run, world)
-            used = model.responses if isinstance(model, Recorder) else _consumed(cassette, model)
-            turns.append(len(used))
-            tokens.append(sum(_tokens(r) for r in used))
-        except Exception as exc:  # noqa: BLE001  (a crash is a failed case, not a failed suite)
-            fails = [f"{type(exc).__name__}: {exc}"]
-        seconds.append(time.monotonic() - started)
-        tc = ET.SubElement(suite, "testcase", classname="evals", name=case["id"], time=f"{seconds[-1]:.3f}")
-        if fails:
-            failed += 1
-            ET.SubElement(tc, "failure", message=fails[0]).text = "\n".join(fails)
-        print(f"{'FAIL' if fails else 'pass'}  {case['id']}" + "".join(f"\n      {f}" for f in fails))
-        if args.record and isinstance(model, Recorder) and not fails:
-            cassette.write_text(json.dumps(model.responses, indent=1))
-    suite.set("tests", str(len(suite)))
-    suite.set("failures", str(failed))
+            if fails:
+                failed += 1
+                ET.SubElement(tc, "failure", message=fails[0]).text = "\n".join(fails)
+            label = case["id"] if name == DEFAULT else f"{case['id']} [{name}]"
+            print(f"{'FAIL' if fails else 'pass'}  {label}" + "".join(f"\n      {f}" for f in fails))
+            if args.record and name == DEFAULT and isinstance(model, Recorder) and not fails:
+                cassette.write_text(json.dumps(model.responses, indent=1))
+        suite.set("tests", str(len(suite)))
+        suite.set("failures", str(failed))
+        print(f"{name}: {len(suite) - failed}/{len(suite)} passed")
+        failed_total += failed
     Path(args.junit).parent.mkdir(parents=True, exist_ok=True)
-    ET.ElementTree(suite).write(args.junit, encoding="utf-8", xml_declaration=True)
-    print(f"{len(suite) - failed}/{len(suite)} passed")
+    root = suites if len(suites) > 1 else suites[0]
+    ET.ElementTree(root).write(args.junit, encoding="utf-8", xml_declaration=True)
     if args.perf:
         ordered = sorted(seconds)
         perf = {
@@ -137,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.perf).parent.mkdir(parents=True, exist_ok=True)
         Path(args.perf).write_text(json.dumps(perf, indent=2))
         print(json.dumps(perf))
-    return 1 if failed else 0
+    return 1 if failed_total else 0
 
 
 def _consumed(cassette: Path, model: Any) -> list[dict[str, Any]]:

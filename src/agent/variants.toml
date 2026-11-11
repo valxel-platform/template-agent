@@ -1,0 +1,20 @@
+# Prompt and model variants this agent may run with. Each is reviewed here, in a pull request, and
+# rolled out through the product's Flipt like a feature: a variant flag named `<AGENT_NAME>.variant`
+# whose variants are named like the tables below. Flipt's rules decide who gets which (a share of
+# people, a tenant, everyone), and each person keeps theirs. Without the flag, or with a variant
+# not listed here, a run uses `default`. See README "Prompt and model variants".
+#
+#   model   the model, through the LLM gateway ("" = AGENT_MODEL)
+#   system  the prompt for runs, from prompts/<name>.md
+#   chat    the prompt for conversations, from prompts/<name>.md
+
+[default]
+model = ""
+system = "system"
+chat = "chat"
+
+# An example: the same instructions on a smaller model. Add its prompts first if they differ.
+# [small]
+# model = "claude-haiku-5-5"
+# system = "system"
+# chat = "chat"

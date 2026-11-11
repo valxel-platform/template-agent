@@ -93,6 +93,27 @@ they do, not only on code paths.
 
 The pipeline's quality policy reads these statuses like any other suite.
 
+## Prompt and model variants
+
+A prompt or model change can go out to a share of people first, through the product's Flipt, like
+a feature, without a redeploy (`src/agent/variants.py`):
+
+1. Add the variant to `src/agent/variants.toml` in a pull request: its model (through the LLM
+   gateway) and the prompts it uses for runs and conversations (new files under `prompts/`). The
+   pull request is reviewed and its evals run like any other change.
+2. In Flipt, create the variant flag `<AGENT_NAME>.variant` with variants named like the tables in
+   `variants.toml`, and roll it out (a share of people, a tenant, everyone). A variant Flipt names
+   but `variants.toml` doesn't have never runs; without the flag every run uses `default`.
+
+A run picks its variant once, by the person who started it (or the triggering event), and keeps it
+to the end, across replicas; a conversation keeps the variant of its first message. Every model call
+carries it: the `chat` span's `vrixel.variant`, the gateway's `variant` label (so its ledger and spans
+show each variant's tokens and cost), and the run's trace. After the deploy to dev, the evals run
+every variant against the real model, one test suite each (`python -m evals.run --live
+--all-variants`); the `integration / report` status counts them all and passes when at least
+`EVALS_MIN_PASS_RATE` of the cases pass (a repository variable, 1 by default). Remove a variant from
+`variants.toml` once it is the default or abandoned.
+
 ## Develop
 
 ```

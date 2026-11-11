@@ -23,6 +23,7 @@ class Model(Protocol):
         tools: list[dict[str, Any]],
         labels: dict[str, str],
         on_text: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -55,12 +56,13 @@ class GatewayModel:
         tools: list[dict[str, Any]],
         labels: dict[str, str],
         on_text: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         cached_tools = [dict(t) for t in tools]
         if cached_tools:
             cached_tools[-1]["cache_control"] = {"type": "ephemeral"}
         kw: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,  # a variant's model (variants.py), else the agent's
             "max_tokens": self.max_tokens,
             "messages": messages,
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
@@ -97,8 +99,17 @@ class ScriptedModel:
         tools: list[dict[str, Any]],
         labels: dict[str, str],
         on_text: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append({"system": system, "messages": [dict(m) for m in messages], "tools": tools})
+        self.calls.append(
+            {
+                "system": system,
+                "messages": [dict(m) for m in messages],
+                "tools": tools,
+                "model": model,
+                "labels": labels,
+            }
+        )
         if not self.responses:
             raise RuntimeError("ScriptedModel ran out of responses")
         nxt = self.responses.pop(0)
