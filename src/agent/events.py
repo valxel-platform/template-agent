@@ -136,7 +136,7 @@ def check(event: str, attributes: dict[str, str]) -> None:
             raise ValueError(f"{event}: attribute {key} needs a short category value")
 
 
-def record(event: str, **attributes: str) -> None:
+def record(event: str, /, **attributes: str) -> None:
     """Something happened that the feature's goal counts."""
     check(event, attributes)
     with _lock:
