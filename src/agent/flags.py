@@ -48,7 +48,7 @@ class _Answers:
         self.items: OrderedDict[tuple[Any, ...], tuple[bool, float]] = OrderedDict()
         self.lock = threading.Lock()
 
-    def get(self, key: tuple[Any, ...]) -> bool | None:
+    def get(self, key: tuple[Any, ...]) -> Any:
         if self.ttl <= 0:
             return None
         with self.lock:
@@ -57,7 +57,7 @@ class _Answers:
                 return None
             return hit[0]
 
-    def put(self, key: tuple[Any, ...], value: bool) -> None:
+    def put(self, key: tuple[Any, ...], value: Any) -> None:
         if self.ttl <= 0:
             return
         with self.lock:
@@ -103,15 +103,28 @@ def use_provider(provider: FeatureProvider, *, cache_s: float = 0.0) -> None:
     api.set_provider(provider)
 
 
+def variant(key: str, default: str, *, user: str = "", **attributes: Any) -> str:
+    """A variant flag's value (a string) for this caller; any error gives `default`. Cached like
+    `enabled`. Prompt and model variants use it (variants.py)."""
+    cached_key = ("variant", key, default, user, tuple(sorted((k, repr(v)) for k, v in attributes.items())))
+    got = _answers.get(cached_key)
+    if got is None:
+        context = EvaluationContext(targeting_key=user or None, attributes=attributes)
+        got = str(api.get_client().get_string_value(key, default, context) or default)
+        _answers.put(cached_key, got)
+    return str(got)
+
+
 def enabled(key: str, default: bool = False, *, user: str = "", **attributes: Any) -> bool:
     """The flag's value for this caller. Any error (server down, unknown flag) gives `default`.
     Pass the user: a gradual release turns a feature on for a share of users, and each keeps the
     same answer. The request counts toward the flag's on or off side (`cohorts`)."""
     cached_key = (key, default, user, tuple(sorted((k, repr(v)) for k, v in attributes.items())))
-    on = _answers.get(cached_key)
-    if on is None:
+    cached = _answers.get(cached_key)
+    if cached is None:
         context = EvaluationContext(targeting_key=user or None, attributes=attributes)
-        on = bool(api.get_client().get_boolean_value(key, default, context))
-        _answers.put(cached_key, on)
+        cached = bool(api.get_client().get_boolean_value(key, default, context))
+        _answers.put(cached_key, cached)
+    on = bool(cached)
     cohorts.seen(key, on)
     return on

@@ -43,6 +43,10 @@ from . import locks
 from .audit import Actor, Auditor, MemorySink
 from .model import Model
 from .tools import Tool, ToolError, ToolHost
+from .variants import DEFAULT as DEFAULT_VARIANT
+from .variants import Variant
+from .variants import load as load_variants
+from .variants import pick as pick_variant
 
 APPROVAL_DECISIONS = ("approve", "reject")
 TAKEOVER_DECISIONS = ("resume", "stop")
@@ -62,6 +66,7 @@ class RunState(TypedDict, total=False):
     kind: str  # run | conversation
     message: str  # a conversation: the person's latest message
     turn: int  # a conversation: how many messages the person has sent
+    variant: str  # the prompt and model variant, picked when the run starts (variants.py)
 
 
 def _blocks(content: Any) -> list[dict[str, Any]]:
@@ -146,10 +151,24 @@ def build_graph(
     emit: Emit | None = None,
     mode: Literal["run", "conversation"] = "run",
     history_turns: int = 20,
+    variants: dict[str, Variant] | None = None,
+    variant: str | None = None,
 ) -> Any:
+    """`variants`: the reviewed prompt and model variants (variants.toml); `variant` forces one for
+    every run (the evals), else Flipt picks per run."""
     audit = auditor or Auditor(MemorySink(), service=agent)
     me = Actor(id=agent, type="agent")
-    prompt = "system" if mode == "run" else "chat"
+    known_variants = variants if variants is not None else load_variants()
+    if variant is not None and variant not in known_variants:
+        raise ValueError(f"no variant {variant!r} in variants.toml")
+
+    def choose(state: RunState) -> str:
+        if variant is not None:
+            return variant
+        task = state.get("task") or {}
+        return pick_variant(
+            agent, known_variants, user=requester(state) or str(task.get("event_id") or state["run_id"])
+        )
 
     def say(thread: str, kind: str, **data: Any) -> None:
         if emit is not None:
@@ -173,8 +192,9 @@ def build_graph(
                 raise
 
     def respond(**kw: Any) -> dict[str, Any]:
-        name = str(getattr(model, "model", "") or "")
+        name = str(kw.get("model") or getattr(model, "model", "") or "")
         with tracer.start_as_current_span(f"chat {name}".strip(), kind=otel.SpanKind.CLIENT) as span:
+            span.set_attribute("vrixel.variant", kw["labels"].get("variant", "default"))
             span.set_attribute("gen_ai.operation.name", "chat")
             span.set_attribute("gen_ai.provider.name", "anthropic")
             span.set_attribute("gen_ai.conversation.id", kw["labels"]["run"])
@@ -236,12 +256,14 @@ def build_graph(
             details={"task_type": str(task.get("type", ""))},
         )
         say(state["run_id"], "turn", turn=1)
+        chosen = choose(state)
         return {
             "messages": [{"role": "user", "content": text}],
             "steps": 0,
             "status": "running",
             "kind": "run",
-            "trace": [_event("started", task_type=task.get("type", ""))],
+            "variant": chosen,
+            "trace": [_event("started", task_type=task.get("type", ""), variant=chosen)],
         }
 
     def listen(state: RunState) -> dict[str, Any]:
@@ -254,7 +276,9 @@ def build_graph(
             details={"turn": turn, "chars": len(state.get("message") or "")},
         )
         say(state["run_id"], "turn", turn=turn, text=state.get("message") or "")
+        chosen = state.get("variant") or choose(state)  # a conversation keeps its first variant
         return {
+            "variant": chosen,
             "messages": [{"role": "user", "content": state.get("message") or ""}],
             "steps": 0,
             "turn": turn,
@@ -270,13 +294,15 @@ def build_graph(
         if steps >= state.get("max_steps", 8):
             return Command(goto="escalate")
         known = catalog()
+        v = known_variants.get(state.get("variant") or DEFAULT_VARIANT) or known_variants[DEFAULT_VARIANT]
         reply = respond(
-            system=system_prompt(product, prompt),
+            system=system_prompt(product, v.prompt(mode)),
             messages=window(state["messages"], history_turns)
             if mode == "conversation"
             else state["messages"],
             tools=[t.definition() for t in known.values()],
-            labels={"run": state["run_id"]},
+            labels={"run": state["run_id"], "variant": v.name},
+            **({"model": v.model} if v.model else {}),
         )
         content = reply.get("content") or []
         assistant = {"role": "assistant", "content": content}

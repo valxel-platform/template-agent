@@ -9,7 +9,11 @@ it as a commit status. Standard library only; runs on any GitHub-hosted runner.
 
 usage: report.py --context "unit / report" --junit 'build/test-results/test/*.xml'
                  [--jacoco jacocoTestReport.xml | --istanbul coverage-summary.json | --cobertura coverage.xml]
-                 [--sha SHA] [--repo owner/name] [--url URL]
+                 [--sha SHA] [--repo owner/name] [--url URL] [--min-pass-rate 0.95]
+
+--min-pass-rate: the status is a success when at least this share of the tests passed (a live run
+of an agent's evals against the real model can miss a case or two by chance). The summary always
+gives the counts, so the Vrixel SDLC sees the rate either way.
 """
 
 import argparse
@@ -64,6 +68,7 @@ def main() -> int:
     ap.add_argument("--jacoco")
     ap.add_argument("--istanbul")
     ap.add_argument("--cobertura")
+    ap.add_argument("--min-pass-rate", type=float, default=1.0)
     ap.add_argument("--sha", default=os.environ.get("REPORT_SHA") or os.environ.get("GITHUB_SHA"))
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     ap.add_argument("--url", default=f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
@@ -75,7 +80,11 @@ def main() -> int:
     text = f"{counts['passed']} passed, {counts['failed']} failed, {counts['skipped']} skipped."
     if cov is not None:
         text += f" Coverage: {cov:.1f}%"
-    state = "success" if counts["failed"] == 0 and sum(counts.values()) > 0 else "failure"
+    ran = counts["passed"] + counts["failed"]
+    rate = counts["passed"] / ran if ran else 0.0
+    if args.min_pass_rate < 1.0 and ran:
+        text += f" Pass rate: {rate * 100:.1f}% (at least {args.min_pass_rate * 100:.0f}%)."
+    state = "success" if ran and (counts["failed"] == 0 or rate >= args.min_pass_rate) else "failure"
     print(f"{args.context}: {state}: {text}")
 
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as summary:

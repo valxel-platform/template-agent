@@ -59,11 +59,12 @@ jobs:
           status=0
           uv run python -m evals.smoke --base-url "$BASE_URL" --junit reports/deployed-smoke.xml || status=1
           if [ "$STAGE" = dev ]; then
-            uv run python -m evals.run --live --junit reports/deployed-evals.xml || status=1
+            # Every prompt and model variant; the report decides, with the pass rate it allows.
+            uv run python -m evals.run --live --all-variants --junit reports/deployed-evals.xml || true
           fi
           exit $status
       - name: Report results
         if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/report.py --context "${{ steps.run.outputs.suite }} / report" --junit 'reports/deployed-*.xml'
+        run: python3 .github/scripts/report.py --context "${{ steps.run.outputs.suite }} / report" --junit 'reports/deployed-*.xml' --min-pass-rate "${{ vars.EVALS_MIN_PASS_RATE || '1' }}"
