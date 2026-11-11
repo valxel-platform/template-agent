@@ -42,6 +42,7 @@ decline in the conversation.
 | Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
 | Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
 | Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
+| Product events | `events.record("referral_triaged")`: the counter `vrixel_events_total` on /metrics, a `vrixel.events` summary line a minute, and per-flag counts. The SDLC tool proves in staging that a feature's goal events fire, reads goals from them after release, and compares users with the feature on against off. Attributes are categories; one that names or identifies a person raises. |
 | Feature flags | OpenFeature with the OFREP provider, pointed at the product's Flipt (`AGENT_FLAGS_URL`). The SDLC tool creates each feature's flag; put new behavior behind `flags.enabled("<key>")`. Unset, every flag is off. |
 
 ## API
@@ -74,6 +75,24 @@ which ends the turn and the stream. A conversation's status is `working`, `await
 asked for them, and the changes run with their token); work that needs someone else's approval
 goes through runs. People reach conversations through the product's BFF, which relays their
 token and passes the stream through.
+
+## Product events
+
+When the HLD's Instrumentation section names this agent as the one that records an event, record
+it where it happens:
+
+```python
+from agent import events
+
+events.record("referral_triaged")
+events.record("referral_triaged", urgency="routine")  # categories only
+```
+
+`agent.events` counts it on `vrixel_events_total{event="referral_triaged"}` (on /metrics), in a
+`vrixel.events {"referral_triaged":12}` log line once a minute (the SDLC tool counts these in
+staging before G6), and on each side of the request's `vrixel.flag_cohorts` line as `"events"`
+(compared during gradual releases). Names are lowercase words joined by `_` or `.`; an attribute
+that names or identifies a person (a name, contact details, an id such as `patient_id`) raises.
 
 ## Evals
 

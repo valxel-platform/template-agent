@@ -32,7 +32,7 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import chat, cohorts, delegation, errors, flags, locks, telemetry
+from . import chat, cohorts, delegation, errors, events, flags, locks, telemetry
 from .audit import Auditor, AuditUnavailable, make_sink
 from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
@@ -154,6 +154,7 @@ class Runner:
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="run")
         self.lock = threading.Lock()
         self.registry = CollectorRegistry()
+        events.register(self.registry)  # vrixel_events_total: the product events goals count
         self.started = Counter("agent_runs_started", "Runs started", registry=self.registry)
         self.finished = Counter(
             "agent_runs_finished", "Runs that reached an end or a review", ["status"], registry=self.registry
@@ -412,6 +413,7 @@ def create_app(
     # Requests per flag, on and off, for the SDLC tool's gradual releases (logged once a minute).
     app.add_middleware(cohorts.CohortMiddleware)
     cohorts.start_reporting()
+    events.start_reporting()
     errors.start_errors()
     telemetry.setup(settings.name, app=app)
     app.state.runner = runner

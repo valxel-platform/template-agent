@@ -10,6 +10,12 @@ release.
     vrixel.flag_cohorts {"flag": "emr.emr-feat-3.kiosk", "on": {"requests": 40, "errors": 0, "slow": 1},
                          "off": {"requests": 760, "errors": 2, "slow": 9}}
 
+The product events a request records (`events.record`) count on the same side, so the tool can
+also compare how often users with a feature on do what its goal counts:
+
+    vrixel.flag_cohorts {"flag": "...", "on": {"requests": 40, "errors": 0, "slow": 1,
+                         "events": {"referral_triaged": 9}}, "off": {...}}
+
 Only counts leave the service: no user, request or value beyond the flag's key.
 """
 
@@ -29,6 +35,10 @@ MARKER = "vrixel.flag_cohorts"
 log = logging.getLogger("agent.cohorts")
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,200}")
 _current: ContextVar[dict[str, bool] | None] = ContextVar("flag_cohorts", default=None)
+_events: ContextVar[dict[str, int] | None] = ContextVar("flag_cohort_events", default=None)
+_EVENT = re.compile(r"[a-z][a-z0-9_.]{0,99}")
+# flag -> event -> [on, off]
+_event_counts: dict[str, dict[str, list[int]]] = {}
 # flag -> [on requests, on errors, on slow, off requests, off errors, off slow]
 _counts: dict[str, list[int]] = {}
 SLOW_MS = float(os.environ.get("FLAG_COHORTS_SLOW_MS", "60000"))
@@ -43,13 +53,24 @@ def seen(key: str, on: bool) -> None:
         current.setdefault(key, bool(on))
 
 
+def event(name: str) -> None:
+    """A product event happened in the current request (`events.record`); outside one it isn't counted."""
+    current = _events.get()
+    if current is not None and _EVENT.fullmatch(name or ""):
+        current[name] = current.get(name, 0) + 1
+
+
 def begin() -> Any:
-    return _current.set({})
+    return (_current.set({}), _events.set({}))
 
 
 def end(token: Any, failed: bool, elapsed_ms: float = 0.0) -> None:
     current = _current.get() or {}
-    _current.reset(token)
+    happened = _events.get() or {}
+    flags_token, events_token = token if isinstance(token, tuple) else (token, None)
+    _current.reset(flags_token)
+    if events_token is not None:
+        _events.reset(events_token)
     if not current:
         return
     with _lock:
@@ -61,21 +82,28 @@ def end(token: Any, failed: bool, elapsed_ms: float = 0.0) -> None:
                 c[side + 1] += 1
             if elapsed_ms > SLOW_MS:
                 c[side + 2] += 1
+            for name, n in happened.items():
+                _event_counts.setdefault(key, {}).setdefault(name, [0, 0])[0 if on else 1] += n
 
 
 def drain() -> list[str]:
     """The lines since the last call, one per flag, and the counts start again."""
     with _lock:
         counts = dict(_counts)
+        events = dict(_event_counts)
         _counts.clear()
+        _event_counts.clear()
+
+    def side(c: list[int], i: int, ev: dict[str, list[int]]) -> dict[str, Any]:
+        out: dict[str, Any] = {"requests": c[i * 3], "errors": c[i * 3 + 1], "slow": c[i * 3 + 2]}
+        if ev:
+            out["events"] = {name: n[i] for name, n in sorted(ev.items())}
+        return out
+
     return [
         f"{MARKER} "
         + json.dumps(
-            {
-                "flag": k,
-                "on": {"requests": c[0], "errors": c[1], "slow": c[2]},
-                "off": {"requests": c[3], "errors": c[4], "slow": c[5]},
-            },
+            {"flag": k, "on": side(c, 0, events.get(k, {})), "off": side(c, 1, events.get(k, {}))},
             separators=(",", ":"),
         )
         for k, c in sorted(counts.items())
