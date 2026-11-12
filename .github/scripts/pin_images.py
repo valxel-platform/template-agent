@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Pin every Dockerfile's base images to the digest their tag points at today (FROM image:tag ->
-FROM image:tag@sha256:...). Dependabot then moves tag and digest together, by pull request.
+"""Pin every image a Dockerfile pulls to the digest its tag points at today (FROM image:tag ->
+FROM image:tag@sha256:..., and the same for COPY --from=image:tag). Dependabot then moves tag and digest together, by pull request.
 Stage names (FROM build), ARG-built names and scratch are left alone."""
 
 import json
@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 FROM = re.compile(r"^(FROM\s+(?:--platform=\S+\s+)?)(\S+)(.*)$", re.I)
+# COPY --from=<image> pulls an image too (COPY --from=<stage> doesn't: stages are tracked below).
+COPY_FROM = re.compile(r"^(COPY\s+(?:--\S+\s+)*?--from=)(\S+)(.*)$", re.I)
 
 
 def digest(image: str) -> str:
@@ -23,6 +25,14 @@ def pin(path: Path) -> bool:
     stages: set[str] = set()
     changed = False
     for i, line in enumerate(lines):
+        c = COPY_FROM.match(line.rstrip("\n"))
+        if c:
+            image = c.group(2)
+            if (image.lower() not in stages and not image.isdigit() and "$" not in image and "@sha256:" not in image
+                    and (":" in image or "/" in image)):
+                lines[i] = f"{c.group(1)}{image}@{digest(image)}{c.group(3)}\n"
+                changed = True
+            continue
         m = FROM.match(line.rstrip("\n"))
         if not m:
             continue
