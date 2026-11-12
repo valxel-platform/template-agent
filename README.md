@@ -40,7 +40,8 @@ decline in the conversation.
 | Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. A run is visible only to whoever started it and to reviewers of the same tenant (others get 404), and nobody approves a change they asked for themselves. |
 | Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `vrixel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
 | Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
-| Observability | `/metrics` (runs started/finished, decisions, errors), `/healthz`, `/readyz` (MCP servers reachable). |
+| Observability | `/metrics` (runs started/finished, decisions, errors, and requests by route, client and status), `/healthz`, `/readyz` (MCP servers reachable). |
+| Who calls it | Every API request is counted by route, OAuth client, calling app and status: a JSON log line (`agent.requests`), span attributes, and `agent_requests_total` / `agent_request_duration_seconds`. No person, ids or request bodies. The agent names itself (clientInfo) to the MCP servers it calls, so their usage records show which agent called. |
 | Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
 | Product events | `events.record("referral_triaged")`: the counter `vrixel_events_total` on /metrics, a `vrixel.events` summary line a minute, and per-flag counts. The SDLC tool proves in staging that a feature's goal events fire, reads goals from them after release, and compares users with the feature on against off. Attributes are categories; one that names or identifies a person raises. |
 | Feature flags | OpenFeature with the OFREP provider, pointed at the product's Flipt (`AGENT_FLAGS_URL`). The SDLC tool creates each feature's flag; put new behavior behind `flags.enabled("<key>")`. Unset, every flag is off. |
@@ -93,6 +94,39 @@ events.record("referral_triaged", urgency="routine")  # categories only
 staging before G6), and on each side of the request's `vrixel.flag_cohorts` line as `"events"`
 (compared during gradual releases). Names are lowercase words joined by `_` or `.`; an attribute
 that names or identifies a person (a name, contact details, an id such as `patient_id`) raises.
+
+## Who calls this agent
+
+`agent.usage` records every API request (not `/healthz`, `/readyz` or `/metrics`) with two names
+for the caller, neither of them a person:
+
+| Name | From | Example |
+| --- | --- | --- |
+| `client` | The OAuth client the token was issued to (`azp` or `client_id`), set when the token is verified; `none` when refused before that | `care-web`, `event-bridge` |
+| `app` | The calling software's User-Agent | `vrixel-bff` |
+
+Per request there is one log line, for example:
+
+```json
+{"message": "POST /runs 202", "http.route": "/runs", "http.request.method": "POST",
+ "agent.client.id": "care-web", "agent.client.app": "vrixel-bff", "http.response.status_code": 202,
+ "event.duration_ms": 18.2, "trace.id": "..."}
+```
+
+and on `/metrics`, beside the run metrics:
+
+```
+agent_requests_total{route, method, client, app, status}
+agent_request_duration_seconds{route, method, client, app}    # histogram
+```
+
+`route` is the route's template (`/runs/{run_id}`), never a path with ids in it. At most 100 OAuth
+clients and 50 apps are named; later ones count as `other`. Which person started or decided which
+run stays in the audit trail.
+
+The other direction: the agent names itself to the MCP servers it calls (`clientInfo`, its
+`AGENT_NAME` and version, sent on every request), so the MCP server template's usage records
+(`mcp_tool_calls_total{app="intake-agent"}`) show which agent made each call.
 
 ## Evals
 

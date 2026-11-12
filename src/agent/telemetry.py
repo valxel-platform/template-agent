@@ -51,6 +51,11 @@ class JsonFormatter(logging.Formatter):
         ctx = trace.get_current_span().get_span_context()
         if ctx.is_valid:
             out["trace.id"], out["span.id"] = f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}"
+        fields = getattr(record, "fields", None)
+        if isinstance(
+            fields, dict
+        ):  # structured fields a caller adds: logger.info(..., extra={"fields": {...}})
+            out.update({k: v for k, v in fields.items() if k not in out})
         if record.exc_info:
             out["error.type"] = record.exc_info[0].__name__ if record.exc_info[0] else ""
             out["error.stack_trace"] = self.formatException(record.exc_info)

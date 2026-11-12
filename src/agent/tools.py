@@ -33,6 +33,15 @@ class ToolHost(Protocol):
     def call(self, tool: Tool, args: dict[str, Any], idempotency_key: str) -> str: ...
 
 
+def _version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("agent")
+    except PackageNotFoundError:
+        return ""
+
+
 class McpToolHost:
     """MCP servers over Streamable HTTP (or in-process servers in tests)."""
 
@@ -42,8 +51,13 @@ class McpToolHost:
         allowed: list[str],
         audiences: dict[str, tuple[str, str]] | None = None,
         exchange: delegation.TokenExchange | None = None,
+        client_name: str = "vrixel-agent",
+        client_version: str = "",
     ) -> None:
         self.servers = servers  # name -> URL or in-process server
+        # How this agent names itself to the MCP servers it calls (clientInfo, sent with every
+        # request): their usage records show which agent called, not just "mcp".
+        self.client_name, self.client_version = client_name, client_version
         self.allowed = allowed
         self.audiences = audiences or {}  # name -> (audience, scope)
         self.exchange = exchange
@@ -56,6 +70,8 @@ class McpToolHost:
             settings.allowed_tools,
             {s.name: (s.audience, s.scope) for s in settings.mcp_servers},
             delegation.from_settings(settings),
+            client_name=settings.name,
+            client_version=_version(),
         )
 
     def bearer(self, server: str, *, listing: bool = False) -> str | None:
@@ -87,7 +103,10 @@ class McpToolHost:
             token = self.bearer(server, listing=listing)
             headers = {"Authorization": f"Bearer {token}"} if token else {}
             target = streamable_http_client(target, http_client=create_mcp_http_client(headers=headers))
-        async with Client(target) as client:
+        from mcp.types import Implementation
+
+        info = Implementation(name=self.client_name, version=self.client_version or "0")
+        async with Client(target, client_info=info) as client:
             return await fn(client)
 
     def tools(self) -> list[Tool]:
