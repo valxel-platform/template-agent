@@ -3,7 +3,7 @@
 # Both stages use the same Python image: the venv is built for that exact Python, so the build and
 # runtime images must move together (Dependabot bumps both FROM lines in one pull request, and CI
 # starts the image to prove it runs).
-FROM python:3.13-slim-bookworm AS build
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72 AS build
 COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PYTHON=/usr/local/bin/python3
 WORKDIR /app
@@ -13,7 +13,7 @@ COPY src src
 COPY README.md ./
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
 RUN useradd --uid 10001 --no-create-home app
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
