@@ -32,7 +32,7 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import chat, cohorts, delegation, errors, events, flags, locks, telemetry
+from . import chat, cohorts, delegation, errors, events, flags, locks, telemetry, usage
 from .audit import Auditor, AuditUnavailable, make_sink
 from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
@@ -412,6 +412,8 @@ def create_app(
     app.add_middleware(errors.TraceResponseMiddleware)
     # Requests per flag, on and off, for the SDLC tool's gradual releases (logged once a minute).
     app.add_middleware(cohorts.CohortMiddleware)
+    # Which clients call which routes, how fast, how it went (usage.py), on /metrics with the runs.
+    app.add_middleware(usage.UsageMiddleware, metrics=usage.Metrics(runner.registry))
     cohorts.start_reporting()
     events.start_reporting()
     errors.start_errors()
@@ -419,7 +421,7 @@ def create_app(
     app.state.runner = runner
 
     def caller(scope: str) -> Callable[..., dict[str, Any]]:
-        def dep(authorization: str = Header(default="")) -> dict[str, Any]:
+        def dep(request: Request, authorization: str = Header(default="")) -> dict[str, Any]:
             if not authorization.lower().startswith("bearer "):
                 raise HTTPException(
                     401, "Send an OAuth bearer token.", headers={"WWW-Authenticate": "Bearer"}
@@ -430,6 +432,8 @@ def create_app(
                 raise HTTPException(
                     401, "The token is not valid.", headers={"WWW-Authenticate": "Bearer"}
                 ) from exc
+            # Which OAuth client called, for the usage records (usage.py); never the person.
+            setattr(request.state, usage.STATE_KEY, usage.client_of(claims))
             if scope not in _scopes(claims):
                 raise HTTPException(403, f"The token needs the {scope} scope.")
             # Kept for delegation (the run's next steps act for this person), never logged or stored.
