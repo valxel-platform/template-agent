@@ -246,3 +246,13 @@ needs more turns, 20% more tokens than main, or misses the budget (8 turns, 60 s
 model latency shows in the post-deploy evals and the pilot's timings; an agent has no staging load
 test (it would pay for model calls).
 
+## How it runs in OpenChoreo
+
+The agent is registered as the platform's `agent` component type, not a plain service. Its pods
+hold no Kubernetes token, have a read-only file system (only `/tmp` is writable), run as a non-root
+user with no capabilities and no privilege escalation, and reach only the product's LLM gateway,
+MCP servers, database and event brokers. PHI and payments agents also run under gVisor. CI starts
+the image the same way, so a change that writes elsewhere or needs a privilege fails here first.
+
+The agent never runs model-written code itself. A design where it must goes through a separate
+code-execution sandbox (planned), never this pod.
