@@ -154,7 +154,7 @@ class Runner:
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="run")
         self.lock = threading.Lock()
         self.registry = CollectorRegistry()
-        events.register(self.registry)  # vrixel_events_total: the product events goals count
+        events.register(self.registry)  # valxel_events_total: the product events goals count
         self.started = Counter("agent_runs_started", "Runs started", registry=self.registry)
         self.finished = Counter(
             "agent_runs_finished", "Runs that reached an end or a review", ["status"], registry=self.registry

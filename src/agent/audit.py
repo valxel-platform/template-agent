@@ -1,7 +1,7 @@
 """The audit trail: who did what to which records, and how it turned out.
 
-Every record is one event (CloudEvents 1.0, type `vrixel.audit.v1`) published to the product's
-audit topic on Kafka. The platform's audit sink (vrixel-shared-services/ss-audit-sink) copies the
+Every record is one event (CloudEvents 1.0, type `valxel.audit.v1`) published to the product's
+audit topic on Kafka. The platform's audit sink (valxel-shared-services/ss-audit-sink) copies the
 topic into an append-only, hash-chained Postgres table and archives it to object storage.
 
 Records name people and records by id only. Never put field values in them (names, notes, dates
@@ -28,7 +28,7 @@ from typing import Any, Literal, Protocol
 
 log = logging.getLogger("audit")
 
-EVENT_TYPE = "vrixel.audit.v1"
+EVENT_TYPE = "valxel.audit.v1"
 Outcome = Literal["success", "denied", "failure"]
 ActorType = Literal["user", "service", "agent"]
 

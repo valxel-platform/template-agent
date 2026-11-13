@@ -1,5 +1,5 @@
 # Required checks on the default branch: unit, evals (and CodeQL, from default setup).
-# Job names are the check names the Vrixel SDLC and the branch ruleset look for; keep them.
+# Job names are the check names the Valxel SDLC and the branch ruleset look for; keep them.
 name: ci
 
 on:

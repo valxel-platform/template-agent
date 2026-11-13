@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post a test suite's results as a commit status the Vrixel SDLC reads.
+"""Post a test suite's results as a commit status the Valxel SDLC reads.
 
 The pipeline's quality policy matches suites by check name (unit*, contract*, integration*, e2e*,
 smoke*) and reads counts and coverage from the summary text, e.g.
@@ -13,7 +13,7 @@ usage: report.py --context "unit / report" --junit 'build/test-results/test/*.xm
 
 --min-pass-rate: the status is a success when at least this share of the tests passed (a live run
 of an agent's evals against the real model can miss a case or two by chance). The summary always
-gives the counts, so the Vrixel SDLC sees the rate either way.
+gives the counts, so the Valxel SDLC sees the rate either way.
 """
 
 import argparse

@@ -7,13 +7,13 @@ minute each flag's counts are logged as one line, which the tool sums across pod
 OpenChoreo's logs and compares: users who fail more, or wait longer, with the feature on stop its
 release.
 
-    vrixel.flag_cohorts {"flag": "emr.emr-feat-3.kiosk", "on": {"requests": 40, "errors": 0, "slow": 1},
+    valxel.flag_cohorts {"flag": "emr.emr-feat-3.kiosk", "on": {"requests": 40, "errors": 0, "slow": 1},
                          "off": {"requests": 760, "errors": 2, "slow": 9}}
 
 The product events a request records (`events.record`) count on the same side, so the tool can
 also compare how often users with a feature on do what its goal counts:
 
-    vrixel.flag_cohorts {"flag": "...", "on": {"requests": 40, "errors": 0, "slow": 1,
+    valxel.flag_cohorts {"flag": "...", "on": {"requests": 40, "errors": 0, "slow": 1,
                          "events": {"referral_triaged": 9}}, "off": {...}}
 
 Only counts leave the service: no user, request or value beyond the flag's key.
@@ -31,7 +31,7 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
-MARKER = "vrixel.flag_cohorts"
+MARKER = "valxel.flag_cohorts"
 log = logging.getLogger("agent.cohorts")
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,200}")
 _current: ContextVar[dict[str, bool] | None] = ContextVar("flag_cohorts", default=None)

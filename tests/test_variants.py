@@ -97,7 +97,7 @@ def test_a_run_keeps_its_variant_and_every_call_says_which(tools: McpToolHost) -
     (call,) = model.calls
     assert call["model"] == "claude-haiku-5-5" and call["labels"] == {"run": "r-ana", "variant": "small"}
     chat = [s for s in exporter.get_finished_spans() if s.name.startswith("chat ")][-1]
-    assert chat.name == "chat claude-haiku-5-5" and chat.attributes["vrixel.variant"] == "small"
+    assert chat.name == "chat claude-haiku-5-5" and chat.attributes["valxel.variant"] == "small"
     other = ScriptedModel([reply(text("Done."))])
     assert run(tools, other, user="bob")["variant"] == "default"
     assert other.calls[0]["model"] is None and other.calls[0]["labels"]["variant"] == "default"

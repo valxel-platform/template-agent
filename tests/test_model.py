@@ -47,7 +47,7 @@ def test_gateway_model_sends_cacheable_requests_with_labels() -> None:
     assert out["content"] == [{"type": "text", "text": "hi"}]
     assert seen["url"] == "http://gw.test/v1/messages"
     assert seen["headers"]["authorization"] == "Bearer gw-key"  # the gateway accepts this or x-api-key
-    assert seen["headers"]["x-vrixel-agent"] == "intake-agent" and seen["headers"]["x-vrixel-run"] == "r1"
+    assert seen["headers"]["x-valxel-agent"] == "intake-agent" and seen["headers"]["x-valxel-run"] == "r1"
     assert seen["body"]["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert seen["body"]["tools"][-1]["cache_control"] == {"type": "ephemeral"}
 

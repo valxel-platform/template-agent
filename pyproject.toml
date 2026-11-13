@@ -1,7 +1,7 @@
 [project]
 name = "agent"
 version = "0.1.0"
-description = "Vrixel workflow agent template: a durable LangGraph agent with human approval, MCP tools and models through the product's LLM gateway."
+description = "Valxel workflow agent template: a durable LangGraph agent with human approval, MCP tools and models through the product's LLM gateway."
 requires-python = ">=3.12"
 dependencies = [
   "langgraph>=1.2,<2",

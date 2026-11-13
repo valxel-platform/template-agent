@@ -1,4 +1,4 @@
-# Runs after the Vrixel SDLC deploys a commit. Every stage checks the deployed agent (up, MCP
+# Runs after the Valxel SDLC deploys a commit. Every stage checks the deployed agent (up, MCP
 # servers reachable, auth enforced). In dev the evals also run against the real model through
 # the dev LLM gateway: that is the agent's integration suite. Results are posted on the deployed
 # commit as "integration / report", "e2e / report" and "smoke / report".
@@ -10,7 +10,7 @@ name: post-deploy
 
 on:
   repository_dispatch:
-    types: [vrixel-deployed]
+    types: [valxel-deployed]
   workflow_dispatch:
     inputs:
       stage: { description: "dev, staging or production", required: true, type: choice, options: [dev, staging, production] }
