@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Valxel workflow agent template: a durable LangGraph agent with human approval, MCP tools and models through the product's LLM gateway."
 requires-python = ">=3.12"
 dependencies = [
-  "langgraph>=1.2,<2",
+  "langgraph>=1.2.20,<2",
   "langgraph-checkpoint-postgres>=3.2,<4",
   "psycopg[binary,pool]>=3.3.6",
   "anthropic>=2.4,<3",
