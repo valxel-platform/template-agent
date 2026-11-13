@@ -1,5 +1,5 @@
-# Performance smoke test, on pull requests the Vrixel SDLC labels vrixel:perf-smoke or
-# vrixel:perf-full. The recorded evals run on main's code and the PR's: the most model turns a case
+# Performance smoke test, on pull requests the Valxel SDLC labels valxel:perf-smoke or
+# valxel:perf-full. The recorded evals run on main's code and the PR's: the most model turns a case
 # takes, seconds per case, and tokens per case (what a run costs). perf/compare.py posts
 # "perf-smoke / report": failed when the PR needs more turns or 20% more tokens than main, or misses
 # the budget (8 turns, 60 s per run). Live latency is the post-deploy evals' to watch.
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   perf-smoke:
     name: perf-smoke
-    if: contains(github.event.pull_request.labels.*.name, 'vrixel:perf-smoke') || contains(github.event.pull_request.labels.*.name, 'vrixel:perf-full')
+    if: contains(github.event.pull_request.labels.*.name, 'valxel:perf-smoke') || contains(github.event.pull_request.labels.*.name, 'valxel:perf-full')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

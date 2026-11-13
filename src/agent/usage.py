@@ -6,7 +6,7 @@ naming a person:
 
 - one log line on the `agent.requests` logger, JSON like every other log line (trace ids included):
       {"message": "POST /runs 202", "http.route": "/runs", "http.request.method": "POST",
-       "agent.client.id": "care-web", "agent.client.app": "vrixel-bff", "http.response.status_code": 202,
+       "agent.client.id": "care-web", "agent.client.app": "valxel-bff", "http.response.status_code": 202,
        "event.duration_ms": 18.2, ...}
 - attributes on the request's trace span: agent.client.id, agent.client.app;
 - Prometheus metrics on /metrics, beside the agent's run metrics:
@@ -18,7 +18,7 @@ Two names say which client called:
 - `client` is the OAuth client the caller's token was issued to (azp or client_id), set when the
   token is verified: the web app's client behind the BFF, another agent, an event bridge. Never
   the person (`sub`); which person started or decided which run is the audit trail's job.
-- `app` is the calling software, from its User-Agent (vrixel-bff/1.4 -> vrixel-bff).
+- `app` is the calling software, from its User-Agent (valxel-bff/1.4 -> valxel-bff).
 
 `route` is the route's template (/runs/{run_id}), never the path with its ids. Label values are
 bounded: at most 100 OAuth clients and 50 apps are named, later ones count as "other". A request
@@ -72,7 +72,7 @@ def clean(name: str, limit: int = 40) -> str:
 
 
 def app_from_user_agent(user_agent: str) -> str:
-    """The calling software: the first product in its User-Agent (vrixel-bff/1.4 -> vrixel-bff)."""
+    """The calling software: the first product in its User-Agent (valxel-bff/1.4 -> valxel-bff)."""
     first = (user_agent or "").strip().split(" ", 1)[0]
     return clean(first.split("/", 1)[0])
 

@@ -46,7 +46,7 @@ jobs:
         run: |
           git add -A
           git diff --cached --quiet && { echo "nothing to pin"; exit 0; }
-          git -c user.name="vrixel-pins" -c user.email="vrixel-pins@users.noreply.github.com" \
+          git -c user.name="valxel-pins" -c user.email="valxel-pins@users.noreply.github.com" \
             commit -q -m "Pin base images, dependencies and their checksums"
           if [ "$REF" = "main" ]; then
             branch="supply-chain-pins-$(date +%Y%m%d)"

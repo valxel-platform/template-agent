@@ -1,6 +1,6 @@
 # template-agent
 
-The Vrixel template for an **agent**: a durable LangGraph agent that works on tasks (runs) and
+The Valxel template for an **agent**: a durable LangGraph agent that works on tasks (runs) and
 talks with people (conversations), using the product's MCP tools, with every change approved by a
 person and every model call going through the product's LLM gateway. It runs on any number of
 replicas.
@@ -38,12 +38,12 @@ decline in the conversation.
 | Streaming | The executing pod writes progress (the reply's text as it is written, each tool step, proposals, the end of the turn) to Postgres and NOTIFYs; any pod streams it as Server-Sent Events, and a reconnect resumes from `Last-Event-ID` (`store.py`). Progress is pruned after a day; the conversation itself stays in the checkpoint. |
 | Runaway runs | `AGENT_MAX_STEPS` model turns, then a person decides to resume or stop. A conversation's model sees its last `AGENT_CHAT_HISTORY_TURNS` exchanges, so long conversations don't grow without bound. |
 | Auth | OAuth 2.0 bearer tokens from the product's IdP: `agent:run` to start and read runs, `agent:review` to decide. A run is visible only to whoever started it and to reviewers of the same tenant (others get 404), and nobody approves a change they asked for themselves. |
-| Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `vrixel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
+| Audit | Who started each run, who approved or rejected which changes, each change the agent applied (on whose behalf) and stops and resumes are published as audit records (CloudEvents, `valxel.audit.v1`) to the product's Kafka audit topic; the platform's audit sink keeps them in an append-only, hash-chained table and archives them to object storage. If a decision can't be recorded it isn't applied, and the run says so. The run's own trace (`GET /runs/{id}`) still shows every model turn, tool call and refusal. |
 | Tracing | OpenTelemetry: a span per run, model turn (`chat`, with model and token counts) and tool call (`execute_tool`), following the GenAI conventions and never carrying prompt or result text. Runs join the trace of the request that started them, and `traceparent` goes on to the gateway and MCP servers. Logs are JSON with `trace.id`. |
 | Observability | `/metrics` (runs started/finished, decisions, errors, and requests by route, client and status), `/healthz`, `/readyz` (MCP servers reachable). |
 | Who calls it | Every API request is counted by route, OAuth client, calling app and status: a JSON log line (`agent.requests`), span attributes, and `agent_requests_total` / `agent_request_duration_seconds`. No person, ids or request bodies. The agent names itself (clientInfo) to the MCP servers it calls, so their usage records show which agent called. |
 | Data minimization | The prompt tells the model to repeat only what the next step needs; evals check it. |
-| Product events | `events.record("referral_triaged")`: the counter `vrixel_events_total` on /metrics, a `vrixel.events` summary line a minute, and per-flag counts. The SDLC tool proves in staging that a feature's goal events fire, reads goals from them after release, and compares users with the feature on against off. Attributes are categories; one that names or identifies a person raises. |
+| Product events | `events.record("referral_triaged")`: the counter `valxel_events_total` on /metrics, a `valxel.events` summary line a minute, and per-flag counts. The SDLC tool proves in staging that a feature's goal events fire, reads goals from them after release, and compares users with the feature on against off. Attributes are categories; one that names or identifies a person raises. |
 | Feature flags | OpenFeature with the OFREP provider, pointed at the product's Flipt (`AGENT_FLAGS_URL`). The SDLC tool creates each feature's flag; put new behavior behind `flags.enabled("<key>")`. Unset, every flag is off. |
 
 ## API
@@ -89,9 +89,9 @@ events.record("referral_triaged")
 events.record("referral_triaged", urgency="routine")  # categories only
 ```
 
-`agent.events` counts it on `vrixel_events_total{event="referral_triaged"}` (on /metrics), in a
-`vrixel.events {"referral_triaged":12}` log line once a minute (the SDLC tool counts these in
-staging before G6), and on each side of the request's `vrixel.flag_cohorts` line as `"events"`
+`agent.events` counts it on `valxel_events_total{event="referral_triaged"}` (on /metrics), in a
+`valxel.events {"referral_triaged":12}` log line once a minute (the SDLC tool counts these in
+staging before G6), and on each side of the request's `valxel.flag_cohorts` line as `"events"`
 (compared during gradual releases). Names are lowercase words joined by `_` or `.`; an attribute
 that names or identifies a person (a name, contact details, an id such as `patient_id`) raises.
 
@@ -103,13 +103,13 @@ for the caller, neither of them a person:
 | Name | From | Example |
 | --- | --- | --- |
 | `client` | The OAuth client the token was issued to (`azp` or `client_id`), set when the token is verified; `none` when refused before that | `care-web`, `event-bridge` |
-| `app` | The calling software's User-Agent | `vrixel-bff` |
+| `app` | The calling software's User-Agent | `valxel-bff` |
 
 Per request there is one log line, for example:
 
 ```json
 {"message": "POST /runs 202", "http.route": "/runs", "http.request.method": "POST",
- "agent.client.id": "care-web", "agent.client.app": "vrixel-bff", "http.response.status_code": 202,
+ "agent.client.id": "care-web", "agent.client.app": "valxel-bff", "http.response.status_code": 202,
  "event.duration_ms": 18.2, "trace.id": "..."}
 ```
 
@@ -160,7 +160,7 @@ a feature, without a redeploy (`src/agent/variants.py`):
 
 A run picks its variant once, by the person who started it (or the triggering event), and keeps it
 to the end, across replicas; a conversation keeps the variant of its first message. Every model call
-carries it: the `chat` span's `vrixel.variant`, the gateway's `variant` label (so its ledger and spans
+carries it: the `chat` span's `valxel.variant`, the gateway's `variant` label (so its ledger and spans
 show each variant's tokens and cost), and the run's trace. After the deploy to dev, the evals run
 every variant against the real model, one test suite each (`python -m evals.run --live
 --all-variants`); the `integration / report` status counts them all and passes when at least
@@ -189,7 +189,7 @@ uv run agent
 
 | Variable | Default | |
 | --- | --- | --- |
-| `AGENT_NAME` | `intake-agent` | Sent to the gateway as `x-vrixel-agent` for budgets and usage |
+| `AGENT_NAME` | `intake-agent` | Sent to the gateway as `x-valxel-agent` for budgets and usage |
 | `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_KEY` | | The product's LLM gateway and this agent's key |
 | `AGENT_MODEL`, `AGENT_MAX_TOKENS` | `claude-sonnet-5-5`, `2048` | The gateway's model allowlist applies |
 | `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, audience, scope}`: `audience` is the server's client in the realm |
@@ -224,7 +224,7 @@ and mobile apps put on the errors they report, so the SDLC tool sees a failure p
 error here as one incident. With `SENTRY_DSN` set, unhandled exceptions and `ERROR` logs go to
 Sentry, grouped into issues, with the exception type, stack, endpoint path, a `trace_id` tag and a
 `component` tag (`component.py`, which the SDLC tool sets to the component's name when it creates a
-repo from this template, via `.vrixel/identity`)
+repo from this template, via `.valxel/identity`)
 only: never exception messages, formatted messages, local variables, queries, headers, bodies,
 users or breadcrumbs. Also `ENVIRONMENT` and `SENTRY_RELEASE`. Unset, Sentry is off; logs, traces
 and metrics stay in OpenChoreo. For PHI products use a Sentry plan under a BAA, or self-hosted Sentry.
@@ -232,13 +232,13 @@ and metrics stay in OpenChoreo. For PHI products use a Sentry plan under a BAA, 
 ## Delivery
 
 CI (`ci.yml`) runs `unit` and `evals`, dependency review and an image build; CodeQL comes from
-the repo's default setup. These are the required checks the Vrixel SDLC sets on repos with the
-`agent` role. The SDLC deploys through OpenChoreo and then sends `vrixel-deployed`, which runs
+the repo's default setup. These are the required checks the Valxel SDLC sets on repos with the
+`agent` role. The SDLC deploys through OpenChoreo and then sends `valxel-deployed`, which runs
 `post-deploy.yml`: the smoke check at every stage, and live evals in dev.
 
 ## Performance tests
 
-When the Vrixel SDLC labels a pull request `vrixel:perf-smoke` (the graph, the tools, the API or
+When the Valxel SDLC labels a pull request `valxel:perf-smoke` (the graph, the tools, the API or
 the runtime changes; or the reviewer saw a performance risk), `perf.yml` runs the recorded evals on
 main's code and the PR's (`python -m evals.run --perf`): the most model turns a case takes, seconds
 per case and tokens per case. `perf/compare.py` posts `perf-smoke / report`: failed when the PR

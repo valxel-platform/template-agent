@@ -68,8 +68,8 @@ class GatewayModel:
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             "tools": cached_tools,
             "extra_headers": {
-                "x-vrixel-agent": self.agent,
-                **{f"x-vrixel-{k}": v for k, v in labels.items()},
+                "x-valxel-agent": self.agent,
+                **{f"x-valxel-{k}": v for k, v in labels.items()},
             },
         }
         if on_text is None:

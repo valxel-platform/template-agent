@@ -1,1 +1,1 @@
-"""Vrixel workflow agent template."""
+"""Valxel workflow agent template."""

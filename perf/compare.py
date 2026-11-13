@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Judge a performance run against its budget and a reference run, and post the result as a
-commit status the Vrixel SDLC reads (perf-smoke / report on a pull request, performance / report
+commit status the Valxel SDLC reads (perf-smoke / report on a pull request, performance / report
 after a staging deploy). Standard library only.
 
 A run is a k6 summary (handleSummary JSON) or a flat JSON of metrics, e.g.
@@ -22,7 +22,7 @@ import sys
 import urllib.error
 import urllib.request
 
-# Industry-standard starting budgets (the Vrixel SDLC's defaults; products tighten them).
+# Industry-standard starting budgets (the Valxel SDLC's defaults; products tighten them).
 BUDGETS = {
     "api": {"p95_ms": 500, "p99_ms": 1000, "error_rate": 0.01},
     "event-worker": {"lag_p95_s": 5, "error_rate": 0.01},

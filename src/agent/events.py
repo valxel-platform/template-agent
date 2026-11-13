@@ -10,10 +10,10 @@ each. Record them where they happen:
 
 Each event goes three places, all counts:
 
-- the Prometheus counter `vrixel_events_total{event="referral_triaged"}` on /metrics, which a
-  goal's metric can read (`sum(increase(vrixel_events_total{event="referral_triaged"}[$window]))`);
+- the Prometheus counter `valxel_events_total{event="referral_triaged"}` on /metrics, which a
+  goal's metric can read (`sum(increase(valxel_events_total{event="referral_triaged"}[$window]))`);
 - a summary line once a minute, which the tool counts in staging to prove every event fires
-  before release: `vrixel.events {"referral_triaged":12}`;
+  before release: `valxel.events {"referral_triaged":12}`;
 - the current request's flag cohorts (`cohorts.event`), so a gradual release can compare how
   often users with a feature on do it against users with it off.
 
@@ -33,8 +33,8 @@ from typing import Any
 
 from . import cohorts
 
-MARKER = "vrixel.events"
-METRIC = "vrixel_events"
+MARKER = "valxel.events"
+METRIC = "valxel_events"
 log = logging.getLogger("agent.events")
 NAME = re.compile(r"[a-z][a-z0-9_]*(\.[a-z0-9_]+)*")
 _ATTRIBUTE = re.compile(r"[a-z][a-z0-9_]*")

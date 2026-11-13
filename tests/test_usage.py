@@ -74,7 +74,7 @@ def test_each_request_counts_by_route_client_app_and_status(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="agent.requests")
-    ua = {"User-Agent": "vrixel-bff/1.4.0 (spring)"}
+    ua = {"User-Agent": "valxel-bff/1.4.0 (spring)"}
     run = client.post(
         "/runs", json={"task": {"text": "Ana Lopez"}}, headers={"Authorization": "Bearer web", **ua}
     ).json()
@@ -91,7 +91,7 @@ def test_each_request_counts_by_route_client_app_and_status(
             route="/runs",
             method="POST",
             client="care-web",
-            app="vrixel-bff",
+            app="valxel-bff",
             status="202",
         )
         == 1
@@ -107,7 +107,7 @@ def test_each_request_counts_by_route_client_app_and_status(
     first = next(r for r in caplog.records if r.name == "agent.requests")
     assert first.getMessage() == "POST /runs 202"
     line = json.loads(JsonFormatter("intake-agent").format(first))
-    assert line["agent.client.id"] == "care-web" and line["agent.client.app"] == "vrixel-bff"
+    assert line["agent.client.id"] == "care-web" and line["agent.client.app"] == "valxel-bff"
     # Never the person or the request: no subject, no task text.
     assert "nurse-7" not in json.dumps(line) and "Ana" not in json.dumps(line)
 

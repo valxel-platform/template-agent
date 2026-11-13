@@ -40,8 +40,8 @@ def test_the_counter_is_on_metrics_with_its_categories():
     events.record("referral_triaged")
     events.drain()  # the summary line resets; the counter never does
     text = generate_latest(registry).decode()
-    assert 'vrixel_events_total{event="referral_triaged",urgency="routine"} 2.0' in text
-    assert 'vrixel_events_total{event="referral_triaged"} 1.0' in text
+    assert 'valxel_events_total{event="referral_triaged",urgency="routine"} 2.0' in text
+    assert 'valxel_events_total{event="referral_triaged"} 1.0' in text
 
 
 @pytest.mark.parametrize(

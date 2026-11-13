@@ -6,7 +6,7 @@ variants are named like the tables in `variants.toml`. Flipt's rules decide who 
 answer depends only on the person (or the triggering event), so each keeps theirs. A run picks its
 variant once, when it starts, and keeps it to the end, across replicas and restarts.
 
-Every model call carries the variant: on the `chat` span (`vrixel.variant`), in the gateway's labels
+Every model call carries the variant: on the `chat` span (`valxel.variant`), in the gateway's labels
 (so its ledger and spans show what each variant costs), and in the run's trace, so the evals, the
 post-deploy evals and production traces compare variants on the same terms.
 """

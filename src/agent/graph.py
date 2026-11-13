@@ -194,7 +194,7 @@ def build_graph(
     def respond(**kw: Any) -> dict[str, Any]:
         name = str(kw.get("model") or getattr(model, "model", "") or "")
         with tracer.start_as_current_span(f"chat {name}".strip(), kind=otel.SpanKind.CLIENT) as span:
-            span.set_attribute("vrixel.variant", kw["labels"].get("variant", "default"))
+            span.set_attribute("valxel.variant", kw["labels"].get("variant", "default"))
             span.set_attribute("gen_ai.operation.name", "chat")
             span.set_attribute("gen_ai.provider.name", "anthropic")
             span.set_attribute("gen_ai.conversation.id", kw["labels"]["run"])

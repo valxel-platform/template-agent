@@ -51,7 +51,7 @@ class McpToolHost:
         allowed: list[str],
         audiences: dict[str, tuple[str, str]] | None = None,
         exchange: delegation.TokenExchange | None = None,
-        client_name: str = "vrixel-agent",
+        client_name: str = "valxel-agent",
         client_version: str = "",
     ) -> None:
         self.servers = servers  # name -> URL or in-process server

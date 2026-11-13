@@ -1,6 +1,6 @@
 """Feature flags through OpenFeature.
 
-The Vrixel SDLC tool gives each feature a flag (a key like `emr.emr-feat-3.referral-triage`) in
+The Valxel SDLC tool gives each feature a flag (a key like `emr.emr-feat-3.referral-triage`) in
 the product's Flipt when its design is approved: on in dev and staging, off in production until
 the feature is released. Put the feature's new behavior behind it:
 

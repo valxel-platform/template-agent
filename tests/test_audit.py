@@ -68,7 +68,7 @@ def test_a_record_names_who_did_what_to_which_records() -> None:
         details={"count": 2},
     )
     assert sink.events == [e]
-    assert e["specversion"] == "1.0" and e["type"] == "vrixel.audit.v1" and e["source"] == "emr/svc"
+    assert e["specversion"] == "1.0" and e["type"] == "valxel.audit.v1" and e["source"] == "emr/svc"
     assert e["subject"] == "patient/p-1,p-2" and e["time"] == "2026-11-04T06:00:00+00:00"
     d = e["data"]
     assert d["actor"] == {"id": "nurse-7", "type": "user", "client": "web"} and d["on_behalf_of"] == "dr-1"
@@ -84,7 +84,7 @@ def test_kafka_records_are_keyed_by_subject_and_acknowledged() -> None:
     )
     [sent] = p.sent
     assert sent["topic"] == "emr.audit.v1" and sent["key"] == b"task/t-1" and sent["value"] == e
-    assert sent["headers"] == {"ce_type": "vrixel.audit.v1", "ce_id": e["id"]}
+    assert sent["headers"] == {"ce_type": "valxel.audit.v1", "ce_id": e["id"]}
 
 
 @pytest.mark.parametrize(
