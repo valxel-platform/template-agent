@@ -14,7 +14,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 4 * * 1"  # weekly on main: new rules find old code; the findings register picks them up
+    - cron: "17 4 * * 1" # weekly on main: new rules find old code; the findings register picks them up
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write  # upload SARIF to code scanning
+      security-events: write # upload SARIF to code scanning
     container:
       image: semgrep/semgrep:1.185.0
     steps:
@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0  # the whole history: a secret removed later is still exposed
+          fetch-depth: 0 # the whole history: a secret removed later is still exposed
       # Fails on any secret found, and prints where (the value redacted). .gitleaks.toml in the repo
       # adds our own formats; a test fixture that only looks like a secret goes in .gitleaksignore
       # (its fingerprint) or gets a `gitleaks:allow` comment on the line.
@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0  # blame for new-code detection
+          fetch-depth: 0 # blame for new-code detection
       # The repo's own preparation (build, tests with coverage), if it has one: it writes extra
       # scanner arguments to .valxel/sonar.args (e.g. -Dsonar.java.binaries=build/classes).
       - name: Prepare
