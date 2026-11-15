@@ -35,12 +35,14 @@ jobs:
       image: semgrep/semgrep:1.185.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Community rules for the repo's languages, plus the repo's own (.semgrep/, if any). Findings
-      # go to code scanning, where the quality gate reads them; the job itself doesn't fail on them.
+      # Semgrep's default ruleset, plus the repo's own (.semgrep/, if any). Findings go to code
+      # scanning, where the quality gate reads them; the job itself doesn't fail on them. (Not
+      # `--config auto`: it needs Semgrep's metrics on, and they're off.)
       - run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           extra=""
           [ -d .semgrep ] && extra="--config .semgrep"
-          semgrep scan --config auto $extra --sarif --output semgrep.sarif --metrics off
+          semgrep scan --config p/default $extra --sarif --output semgrep.sarif --metrics off
       - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always()
         with:
@@ -54,10 +56,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # the whole history: a secret removed later is still exposed
-      # Fails on any secret found. .gitleaks.toml in the repo adds our own formats (valxel_ keys).
+      # Fails on any secret found, and prints where (the value redacted). .gitleaks.toml in the repo
+      # adds our own formats; a test fixture that only looks like a secret goes in .gitleaksignore
+      # (its fingerprint) or gets a `gitleaks:allow` comment on the line.
       - run: |
           docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
-            git /repo --redact --no-banner --exit-code 1 \
+            git /repo --redact --no-banner --verbose --exit-code 1 \
             $( [ -f .gitleaks.toml ] && echo --config /repo/.gitleaks.toml )
 
   sonarqube:
