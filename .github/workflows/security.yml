@@ -1,0 +1,85 @@
+# Managed by the Valxel SDLC (config/repos.yaml managed_files): `valxel repos check` reports a copy
+# that differs, and `valxel repos apply` opens a pull request to bring it back. Change it in
+# agentic-sdlc (src/valxel_sdlc/standard_files/security.yml), not here.
+#
+# Semgrep (SAST, uploaded to code scanning beside CodeQL), gitleaks (secrets in the history, which
+# push protection doesn't see for our own secret formats) and, once the org has SonarQube Cloud
+# (vars.SONAR_ORGANIZATION), SonarQube's quality gate on new code. The tool reads all three: the
+# sast suite reads code scanning, the secrets suite reads secret scanning and this job's check, and
+# the code-quality suite reads SonarQube (valxel_sdlc.quality.sonar).
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"  # weekly on main: new rules find old code; the findings register picks them up
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF to code scanning
+    container:
+      image: semgrep/semgrep:1.185.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Community rules for the repo's languages, plus the repo's own (.semgrep/, if any). Findings
+      # go to code scanning, where the quality gate reads them; the job itself doesn't fail on them.
+      - run: |
+          extra=""
+          [ -d .semgrep ] && extra="--config .semgrep"
+          semgrep scan --config auto $extra --sarif --output semgrep.sarif --metrics off
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the whole history: a secret removed later is still exposed
+      # Fails on any secret found. .gitleaks.toml in the repo adds our own formats (valxel_ keys).
+      - run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --no-banner --exit-code 1 \
+            $( [ -f .gitleaks.toml ] && echo --config /repo/.gitleaks.toml )
+
+  sonarqube:
+    name: sonarqube
+    if: vars.SONAR_ORGANIZATION != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # blame for new-code detection
+      # The repo's own preparation (build, tests with coverage), if it has one: it writes extra
+      # scanner arguments to .valxel/sonar.args (e.g. -Dsonar.java.binaries=build/classes).
+      - name: Prepare
+        run: |
+          if [ -x .valxel/sonar-prepare.sh ]; then ./.valxel/sonar-prepare.sh; fi
+          echo "args=$(cat .valxel/sonar.args 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+        id: prep
+      - uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            ${{ steps.prep.outputs.args }}
