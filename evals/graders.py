@@ -8,6 +8,9 @@ from typing import Any
 
 from .world import World
 
+# A citation of a knowledge passage: [<source>:<record id>].
+CITATION = re.compile(r"\[([a-z][a-z0-9_-]{1,39}:[^\]\s]+)\]")
+
 
 def grade(case: dict[str, Any], run: dict[str, Any], world: World) -> list[str]:
     exp = case.get("expect", {})
@@ -37,6 +40,15 @@ def grade(case: dict[str, Any], run: dict[str, Any], world: World) -> list[str]:
     for secret in exp.get("result_excludes", []):
         if secret.lower() in result.lower():
             fails.append(f"result repeats {secret!r}")
+    # Answers drawn from a knowledge search cite their passages ([source:id]), and never an id no
+    # tool returned: `cites` must appear, `never_cites` must not.
+    cited = set(CITATION.findall(result))
+    for source_id in exp.get("cites", []):
+        if source_id not in cited:
+            fails.append(f"result doesn't cite [{source_id}]")
+    for source_id in exp.get("never_cites", []):
+        if source_id in cited:
+            fails.append(f"result cites [{source_id}], which it must not")
     steps = run.get("steps", 0)
     if steps > exp.get("max_steps", 8):
         fails.append(f"took {steps} model turns, budget {exp.get('max_steps', 8)}")
