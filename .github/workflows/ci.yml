@@ -63,8 +63,9 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          pipx run diff-cover==11.0.2 coverage.xml --compare-branch="origin/${{ github.base_ref }}" \
+          pipx run diff-cover==11.0.2 coverage.xml --compare-branch="origin/$BASE_REF" \
             --format json:new-code.json
           python3 .github/scripts/report.py --context "code-quality / new code" --new-code new-code.json
 

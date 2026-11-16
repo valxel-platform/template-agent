@@ -28,19 +28,48 @@ fails below --min-new-coverage, and names the lines that no test runs.
 
 import argparse
 import glob
+import http.client
 import json
 import os
 import sys
-import urllib.request
-import xml.etree.ElementTree as ET
+import urllib.parse
+from xml.parsers import expat
+
+
+def elements(path: str) -> list[tuple[int, str, dict]]:
+    """Every element of an XML report as (depth, tag, attributes). A report that declares an
+    entity is refused, and external DTDs (JaCoCo names one) are never fetched."""
+    out, depth = [], [0]
+
+    def start(tag, attrs):
+        out.append((depth[0], tag, attrs))
+        depth[0] += 1
+
+    def end(_tag):
+        depth[0] -= 1
+
+    def refuse(*_args):
+        raise ValueError(f"{path}: XML entities aren't allowed in a test report")
+
+    p = expat.ParserCreate()
+    p.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    p.StartElementHandler, p.EndElementHandler = start, end
+    p.EntityDeclHandler = refuse
+    p.UnparsedEntityDeclHandler = refuse
+    with open(path, "rb") as f:
+        p.ParseFile(f)
+    return out
 
 
 def junit(patterns: list[str]) -> dict:
     total = failed = skipped = 0
     for pattern in patterns:
         for path in glob.glob(pattern, recursive=True):
-            root = ET.parse(path).getroot()
-            for suite in ([root] if root.tag == "testsuite" else root.iter("testsuite")):
+            els = elements(path)
+            if not els:
+                continue
+            suites = els[:1] if els[0][1] == "testsuite" else [e for e in els if e[1] == "testsuite"]
+            for _, _, suite in suites:
                 total += int(suite.get("tests", 0))
                 failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
                 skipped += int(suite.get("skipped", 0))
@@ -50,9 +79,8 @@ def junit(patterns: list[str]) -> dict:
 def jacoco(path: str) -> float | None:
     if not path or not os.path.exists(path):
         return None
-    root = ET.parse(path).getroot()
-    for c in root.findall("counter"):  # report-level counters
-        if c.get("type") == "LINE":
+    for depth, tag, c in elements(path):
+        if depth == 1 and tag == "counter" and c.get("type") == "LINE":  # report-level counters
             covered, missed = int(c.get("covered")), int(c.get("missed"))
             return 100.0 * covered / max(1, covered + missed)
     return None
@@ -62,7 +90,8 @@ def cobertura(path: str) -> float | None:
     """coverage.py / pytest-cov XML (and other Cobertura producers)."""
     if not path or not os.path.exists(path):
         return None
-    return 100.0 * float(ET.parse(path).getroot().get("line-rate", 0))
+    els = elements(path)
+    return 100.0 * float(els[0][2].get("line-rate", 0)) if els else None
 
 
 def istanbul(path: str) -> float | None:
@@ -145,13 +174,19 @@ def main() -> int:
     if not (token and args.repo and args.sha):
         print("No GITHUB_TOKEN, repo or sha: not posting a status", file=sys.stderr)
         return 0 if state == "success" else 1
+    api = urllib.parse.urlsplit(os.environ.get("GITHUB_API_URL") or "https://api.github.com")
+    if api.scheme != "https" or not api.hostname:
+        raise SystemExit(f"GITHUB_API_URL must be an https URL, not {api.geturl()!r}")
     body = json.dumps({"state": state, "context": args.context, "description": text[:140],
-                       "target_url": args.url}).encode()
-    req = urllib.request.Request(f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}/repos/{args.repo}/statuses/{args.sha}",
-                                 data=body, method="POST", headers={
-                                     "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                                     "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=30).read()
+                       "target_url": args.url})
+    conn = http.client.HTTPSConnection(api.hostname, api.port or 443, timeout=30)
+    conn.request("POST", f"{api.path.rstrip('/')}/repos/{args.repo}/statuses/{args.sha}", body=body, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "valxel-report",
+        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    resp = conn.getresponse()
+    resp.read()
+    if resp.status >= 300:
+        raise SystemExit(f"Posting the status failed: HTTP {resp.status}")
     return 0 if state == "success" else 1
 
 
