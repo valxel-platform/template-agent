@@ -65,9 +65,7 @@ def junit(patterns: list[str]) -> dict:
     total = failed = skipped = 0
     for pattern in patterns:
         for path in glob.glob(pattern, recursive=True):
-            els = elements(path)
-            if not els:
-                continue
+            els = elements(path)  # a report always has a root element (expat raises otherwise)
             suites = els[:1] if els[0][1] == "testsuite" else [e for e in els if e[1] == "testsuite"]
             for _, _, suite in suites:
                 total += int(suite.get("tests", 0))
