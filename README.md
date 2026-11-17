@@ -29,7 +29,7 @@ decline in the conversation.
 | Concern | How |
 | --- | --- |
 | Models | Anthropic SDK pointed at the product's LLM gateway (`AGENT_GATEWAY_URL`). The gateway enforces the data class (PHI only to BAA providers), redacts, meters spend and holds the provider keys; the agent holds only a gateway key. System prompt and tools are prompt-cached. |
-| Tools | The product's MCP servers (`AGENT_MCP_SERVERS`), filtered by an allowlist (`AGENT_ALLOWED_TOOLS`). Tools annotated `readOnlyHint` run immediately; everything else, including unannotated tools, needs approval. |
+| Tools | The product's MCP servers (`AGENT_MCP_SERVERS`), filtered by an allowlist (`AGENT_ALLOWED_TOOLS`). Tools on the agent's own read-only list (`AGENT_READ_ONLY_TOOLS`) run immediately; everything else needs approval. A server's `readOnlyHint` never makes a tool skip approval (annotations are hints), though a tool the server marks as writing or destructive needs approval even if the list names it. Reads run with each server's read scope and approved changes with its write scope, so the server refuses a change made without approval. Tool results reach the model inside `<untrusted>` blocks, and the prompt says never to follow instructions in them. |
 | Acting for people | Every MCP call carries a token Keycloak exchanged (RFC 8693) for that server only, on behalf of the person behind the step: the run's starter for its steps, the approver for the changes they approved. No fixed tokens; people's tokens stay in memory, never in checkpoints (`delegation.py`). |
 | Human approval | A LangGraph interrupt. Reviewers can approve all, approve some (`approved_ids`) or reject with a note the model sees. The reviewer's identity is in the trace. |
 | Safe retries | Each approved call carries `idempotency_key = <run>:<tool_use_id>`; `POST /runs` takes an `Idempotency-Key`; events are keyed by their id. |
@@ -181,6 +181,7 @@ Run locally against a gateway:
 ```
 export AGENT_GATEWAY_URL=http://localhost:8080 AGENT_GATEWAY_KEY=...
 export AGENT_MCP_SERVERS='[{"name":"care","url":"http://localhost:9000/mcp"}]'   # no audience: no token locally
+export AGENT_ALLOWED_TOOLS='["care__*"]' AGENT_READ_ONLY_TOOLS='["care__find_patient","care__list_open_tasks"]'
 export AGENT_OIDC_ISSUER=... AGENT_OIDC_AUDIENCE=... AGENT_OIDC_JWKS_URL=...
 uv run agent
 ```
@@ -192,10 +193,11 @@ uv run agent
 | `AGENT_NAME` | `intake-agent` | Sent to the gateway as `x-valxel-agent` for budgets and usage |
 | `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_KEY` | | The product's LLM gateway and this agent's key |
 | `AGENT_MODEL`, `AGENT_MAX_TOKENS` | `claude-sonnet-5-5`, `2048` | The gateway's model allowlist applies |
-| `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, audience, scope}`: `audience` is the server's client in the realm |
+| `AGENT_MCP_SERVERS` | `[]` | JSON list of `{name, url, audience, read_scope, write_scope}`: `audience` is the server's client in the realm; reads get `read_scope`, approved changes `write_scope` (the older `scope` sets both) |
 | `AGENT_TOKEN_URL`, `AGENT_CLIENT_ID` | | The realm's token endpoint and this agent's client, for token exchange |
 | `AGENT_CLIENT_KEY_FILE`, `AGENT_CLIENT_KEY_ID` | | `private_key_jwt` client authentication (preferred), or `AGENT_CLIENT_SECRET` |
 | `AGENT_ALLOWED_TOOLS` | `[]` | fnmatch patterns on `<server>__<tool>`. Deny by default: list each tool (or `care__*`) the agent may use |
+| `AGENT_READ_ONLY_TOOLS` | `[]` | Which allowed tools run without approval (fnmatch patterns). Name only tools that read: a write listed here still needs approval if its server marks it as writing, but nothing else stops it |
 | `AGENT_TENANT_CLAIM` | `organization` | The token claim naming the caller's tenant: runs are visible to their requester and to reviewers of the same tenant |
 | `AGENT_ALLOW_SELF_APPROVAL` | `false` | Whether the person who asked for a change may approve it themselves |
 | `AGENT_MODEL_TIMEOUT_S` | `120` | One model call's timeout |

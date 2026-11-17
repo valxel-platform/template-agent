@@ -86,3 +86,4 @@ class World:
 
 
 ALLOWED_TOOLS = ["care__find_patient", "care__list_open_tasks", "care__create_task"]
+READ_ONLY_TOOLS = ["care__find_patient", "care__list_open_tasks"]

@@ -139,7 +139,31 @@ def test_every_call_to_a_server_acts_for_the_person_behind_the_step(keycloak: Ke
     s = Settings(
         mcp_servers=[McpServer(name="care", url="https://care", audience="emr-care-mcp", scope="tasks:write")]
     )
-    assert McpToolHost.from_settings(s).audiences == {"care": ("emr-care-mcp", "tasks:write")}
+    # The older single scope serves both reads and writes.
+    assert McpToolHost.from_settings(s).audiences == {"care": ("emr-care-mcp", "tasks:write", "tasks:write")}
+    split = Settings(
+        mcp_servers=[
+            McpServer(
+                name="care",
+                url="https://care",
+                audience="emr-care-mcp",
+                read_scope="tasks:read",
+                write_scope="tasks:write",
+            )
+        ]
+    )
+    want = {"care": ("emr-care-mcp", "tasks:read", "tasks:write")}
+    assert McpToolHost.from_settings(split).audiences == want
+
+
+def test_reads_get_the_read_scope_and_approved_changes_the_write_scope(keycloak: Keycloak) -> None:
+    scopes = {"care": ("emr-care-mcp", "tasks:read", "tasks:write")}
+    host = McpToolHost({"care": "https://care"}, ["*"], scopes, exchange(keycloak))
+    with delegation.acting_for("nurse-token"):
+        host.bearer("care")
+        assert keycloak.requests[-1]["form"]["scope"] == "tasks:read"
+        host.bearer("care", write=True)
+        assert keycloak.requests[-1]["form"]["scope"] == "tasks:write"
 
 
 class RecordingTools:

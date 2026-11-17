@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent.tools import McpToolHost
-from evals.world import ALLOWED_TOOLS, World
+from evals.world import ALLOWED_TOOLS, READ_ONLY_TOOLS, World
 
 
 def tool_use(i: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -39,4 +39,4 @@ def world() -> World:
 
 @pytest.fixture
 def tools(world: World) -> McpToolHost:
-    return McpToolHost({"care": world.server}, ALLOWED_TOOLS)
+    return McpToolHost({"care": world.server}, ALLOWED_TOOLS, read_only=READ_ONLY_TOOLS)
