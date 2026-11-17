@@ -59,7 +59,8 @@ def pin(path: Path) -> bool:
             if len(words) >= 2 and words[0].upper() == "AS":
                 stages.add(words[1].lower())
     if changed:
-        path.write_text("".join(lines))
+        # NOSONAR: path is a Dockerfile found by walking this repository's own checkout (dockerfiles()), in CI
+        path.write_text("".join(lines))  # NOSONAR
     return changed
 
 
