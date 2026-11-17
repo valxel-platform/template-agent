@@ -13,7 +13,7 @@ XML), and posts it as a commit status. Standard library only; runs on any GitHub
 
 usage: report.py --context "unit / report" --junit 'build/test-results/test/*.xml'
                  [--jacoco jacocoTestReport.xml | --istanbul coverage-summary.json | --cobertura coverage.xml]
-                 [--sha SHA] [--repo owner/name] [--url URL] [--min-pass-rate 0.95]
+                 [--sha SHA] [--repo owner/name] [--url URL] [--min-pass-rate 0.95] [--must-pass 'leak:*']
 
        report.py --context "code-quality / new code" --new-code new-code.json [--min-new-coverage 80]
 
@@ -21,12 +21,17 @@ usage: report.py --context "unit / report" --junit 'build/test-results/test/*.xm
 of an agent's evals against the real model can miss a case or two by chance). The summary always
 gives the counts, so the Valxel SDLC sees the rate either way.
 
+--must-pass: test cases (by name, shell-style patterns, repeatable) that must pass whatever the pass
+rate: a knowledge repo's retrieval evals allow a few questions to miss (--min-pass-rate), but never
+a passage shown to someone who must not see it ('leak:*') or a deleted record ('deleted:*').
+
 --new-code: diff-cover's JSON report (`diff-cover <coverage> --compare-branch origin/<base>
 --format json:new-code.json`), i.e. coverage of the lines this pull request changes. The status
 fails below --min-new-coverage, and names the lines that no test runs.
 """
 
 import argparse
+import fnmatch
 import glob
 import http.client
 import json
@@ -72,6 +77,23 @@ def junit(patterns: list[str]) -> dict:
                 failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
                 skipped += int(suite.get("skipped", 0))
     return {"passed": total - failed - skipped, "failed": failed, "skipped": skipped}
+
+
+def failed_cases(patterns: list[str]) -> list[str]:
+    """The names of the test cases that failed or errored."""
+    out = []
+    for pattern in patterns:
+        for path in glob.glob(pattern, recursive=True):
+            case, case_depth = None, -1
+            for depth, tag, attrs in elements(path):
+                if case is not None and depth <= case_depth:
+                    case = None
+                if tag == "testcase":
+                    case, case_depth = attrs.get("name", ""), depth
+                elif case is not None and tag in ("failure", "error"):
+                    out.append(case)
+                    case = None
+    return out
 
 
 def jacoco(path: str) -> float | None:
@@ -142,6 +164,7 @@ def main() -> int:
     ap.add_argument("--istanbul")
     ap.add_argument("--cobertura")
     ap.add_argument("--min-pass-rate", type=float, default=1.0)
+    ap.add_argument("--must-pass", action="append", default=[])
     ap.add_argument("--new-code")
     ap.add_argument("--min-new-coverage", type=float, default=80.0)
     ap.add_argument("--sha", default=os.environ.get("REPORT_SHA") or os.environ.get("GITHUB_SHA"))
@@ -164,6 +187,11 @@ def main() -> int:
         if args.min_pass_rate < 1.0 and ran:
             text += f" Pass rate: {rate * 100:.1f}% (at least {args.min_pass_rate * 100:.0f}%)."
         state = "success" if ran and (counts["failed"] == 0 or rate >= args.min_pass_rate) else "failure"
+        if args.must_pass and counts["failed"]:
+            broken = sorted({c for c in failed_cases(args.junit) if any(fnmatch.fnmatch(c, p) for p in args.must_pass)})
+            if broken:
+                state = "failure"
+                text += f" Must pass, failed: {'; '.join(broken)[:200]}."
     print(f"{args.context}: {state}: {text}")
 
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as summary:
