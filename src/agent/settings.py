@@ -12,9 +12,16 @@ class McpServer(BaseModel):
     url: str
     # The server's audience in the product's Keycloak realm (its client id), and the scopes this
     # agent may request there. Calls carry a token exchanged for the person behind the step
-    # (delegation.py); there are no fixed tokens.
+    # (delegation.py); there are no fixed tokens. Reads, which run before anyone approves, get
+    # read_scope; approved changes get write_scope, so the server refuses a change made with a
+    # read token. `scope` is the older single setting, used for both when they're unset.
     audience: str = ""
+    read_scope: str = ""
+    write_scope: str = ""
     scope: str = ""
+
+    def scopes(self) -> tuple[str, str]:
+        return (self.read_scope or self.scope, self.write_scope or self.scope)
 
 
 class Settings(BaseSettings):
@@ -32,6 +39,9 @@ class Settings(BaseSettings):
     # Deny by default: list each tool (or a server's tools, "care__*") this agent may use. Read
     # tools run by themselves; anything else waits for a person's approval.
     allowed_tools: list[str] = Field(default_factory=list)
+    # Which of those run without a person's approval: this agent's own list, never the server's
+    # word for it (an MCP readOnlyHint is a hint). Everything else is proposed and approved first.
+    read_only_tools: list[str] = Field(default_factory=list)
     # Guardrails
     max_steps: int = 8  # model turns per run before a person is asked to take over
     # Durable runs: Postgres in deployed environments, in memory otherwise.

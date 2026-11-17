@@ -35,7 +35,7 @@ from agent.variants import DEFAULT
 from agent.variants import load as load_variants
 
 from .graders import grade
-from .world import ALLOWED_TOOLS, World
+from .world import ALLOWED_TOOLS, READ_ONLY_TOOLS, World
 
 HERE = Path(__file__).parent
 
@@ -59,7 +59,7 @@ def run_case(
     case: dict[str, Any], model: Model, max_steps: int = 8, variant: str | None = None
 ) -> tuple[dict[str, Any], World]:
     world = World()
-    tools = McpToolHost({"care": world.server}, ALLOWED_TOOLS)
+    tools = McpToolHost({"care": world.server}, ALLOWED_TOOLS, read_only=READ_ONLY_TOOLS)
     graph = build_graph(
         model=model, tools=tools, product="the care team", checkpointer=InMemorySaver(), variant=variant
     )

@@ -39,7 +39,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.types import Command, interrupt
 from opentelemetry import trace as otel
 
-from . import locks
+from . import locks, untrusted
 from .audit import Actor, Auditor, MemorySink
 from .model import Model
 from .tools import Tool, ToolError, ToolHost
@@ -93,7 +93,11 @@ def _event(kind: str, **data: Any) -> dict[str, Any]:
     return {"at": _now(), "kind": kind, **data}
 
 
-def _tool_result(tool_use_id: str, content: str, error: bool = False) -> dict[str, Any]:
+def _tool_result(tool_use_id: str, content: str, error: bool = False, source: str = "") -> dict[str, Any]:
+    """A tool's reply for the model. What a tool returned (or its error text) is outside text: it
+    goes in an untrusted block naming the tool (untrusted.py). The agent's own notices don't."""
+    if source:
+        content = untrusted.wrap(f"tool:{source}", content)
     out: dict[str, Any] = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
     if error:
         out["is_error"] = True
@@ -232,11 +236,11 @@ def build_graph(
         for c in calls:
             try:
                 out = call_tool(known[c["name"]], c.get("input") or {}, f"{run_id}:{c['id']}")
-                results.append(_tool_result(c["id"], out))
+                results.append(_tool_result(c["id"], out, source=c["name"]))
                 trace.append(_event("tool_call", tool=c["name"], input=c.get("input"), ok=True))
                 say(run_id, "step", tool=c["name"], title=step_title(known[c["name"]]), ok=True)
             except ToolError as exc:
-                results.append(_tool_result(c["id"], str(exc), error=True))
+                results.append(_tool_result(c["id"], str(exc), error=True, source=c["name"]))
                 trace.append(
                     _event("tool_call", tool=c["name"], input=c.get("input"), ok=False, error=str(exc))
                 )
@@ -432,14 +436,14 @@ def build_graph(
             outcome, reason = "success", ""
             try:
                 out = call_tool(known[w["name"]], w.get("input") or {}, f"{state['run_id']}:{w['id']}")
-                results.append(_tool_result(w["id"], out))
+                results.append(_tool_result(w["id"], out, source=w["name"]))
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=True, approved=True)
                 )
                 say(state["run_id"], "step", tool=w["name"], title=step_title(known[w["name"]]), ok=True)
             except ToolError as exc:
                 outcome, reason = "failure", "the tool refused the change"
-                results.append(_tool_result(w["id"], str(exc), error=True))
+                results.append(_tool_result(w["id"], str(exc), error=True, source=w["name"]))
                 trace.append(
                     _event("tool_call", tool=w["name"], input=w.get("input"), ok=False, error=str(exc))
                 )
