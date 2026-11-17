@@ -2,7 +2,7 @@
 """Pin every image a Dockerfile pulls to the digest its tag points at today (FROM image:tag ->
 FROM image:tag@sha256:..., and the same for COPY --from=image:tag). Dependabot then moves tag and
 digest together, by pull request. Stage names (FROM build), ARG-built names and scratch are left
-alone. Only the repository's own tracked Dockerfiles are read or written."""
+alone. Only the repository's own Dockerfiles are read or written."""
 
 import json
 import subprocess
@@ -63,17 +63,13 @@ def pin(path: Path) -> bool:
     return changed
 
 
+SKIP = {".git", "node_modules", ".venv", "venv", "build", "dist", ".gradle"}
+
+
 def dockerfiles(root: Path) -> list[Path]:
-    """The repository's tracked Dockerfiles, each checked to be inside it."""
-    names = subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True, text=True, cwd=root).stdout
-    out = []
-    for name in names.split("\0"):
-        if not name or not Path(name).name.startswith("Dockerfile"):
-            continue
-        path = (root / name).resolve()
-        if path.is_relative_to(root) and path.is_file():
-            out.append(path)
-    return out
+    """The repository's Dockerfiles, found by walking it (dependency and build folders skipped)."""
+    return sorted(p for p in root.rglob("Dockerfile*")
+                  if p.is_file() and not SKIP.intersection(p.relative_to(root).parts[:-1]))
 
 
 if __name__ == "__main__":
