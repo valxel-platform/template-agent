@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.valxel.dev/events/valxel.events.v1.schema.json",
+  "x-version": "1.0.0",
+  "title": "valxel.events v1",
+  "description": "A product-event summary line's JSON, after the `valxel.events ` marker: each event a component recorded since its last line, and how many times. The Valxel SDLC (outcomes/instrumentation.py) sums these to prove a feature's events fire and to measure its goal. Counts and event names only, never people. The Valxel SDLC owns this file (agentic-sdlc standard_files/contracts) and keeps every repo's copy at contracts/events/ in step with it; a change a producer could fail is v2.",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {"pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$", "maxLength": 100},
+  "additionalProperties": {"type": "integer", "minimum": 0}
+}

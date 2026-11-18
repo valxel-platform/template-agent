@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.valxel.dev/events/valxel.flag_cohorts.v1.schema.json",
+  "x-version": "1.0.0",
+  "title": "valxel.flag_cohorts v1",
+  "description": "A flag-cohort summary line's JSON, after the `valxel.flag_cohorts ` marker: for one flag, the requests that evaluated it with the flag on and with it off, how many failed, how many were slow, and the goal events each side recorded. The Valxel SDLC (ops/cohorts.py) sums these to stop a gradual release that hurts the users who have the feature. Counts only. `source` is set when the BFF relays a web or mobile app's counts. The Valxel SDLC owns this file (agentic-sdlc standard_files/contracts) and keeps every repo's copy at contracts/events/ in step with it; a change a producer could fail is v2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["flag", "on", "off"],
+  "properties": {
+    "flag": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$"},
+    "source": {"enum": ["web", "mobile"]},
+    "on": {"$ref": "#/$defs/side"},
+    "off": {"$ref": "#/$defs/side"}
+  },
+  "$defs": {
+    "side": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "errors"],
+      "properties": {
+        "requests": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "slow": {"type": "integer", "minimum": 0},
+        "events": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$", "maxLength": 100},
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
