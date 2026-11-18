@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
   "langgraph>=1.2,<2",
   "langgraph-checkpoint-postgres>=3.2,<4",
-  "psycopg[binary,pool]>=3.3.6",
+  "psycopg[binary,pool]>=3.3.8",
   "anthropic>=2.4,<3",
   "mcp>=2.3,<3",
   "fastapi>=0.162,<1",
