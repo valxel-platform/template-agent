@@ -1,0 +1,11 @@
+# The MCP tools this agent may call (valxel-platform/agentic-sdlc, agent_tools.py). The coder writes
+# it from the design's '## Agent tools' line, approved at G4, and the build fails if it allows more.
+# On every deploy the platform sets AGENT_ALLOWED_TOOLS and AGENT_READ_ONLY_TOOLS from it: don't set
+# them anywhere else. Without this file the agent may call nothing.
+#
+#   read_only  tools that change nothing; they run at once. Name each exactly: never a wildcard.
+#   approval   tools a person approves call by call (`<server>__*` covers a server's other tools).
+name: intake-agent
+tools:
+  read_only: [care__find_patient, care__list_open_tasks]
+  approval: [care__create_task, care__complete_task]
