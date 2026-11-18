@@ -1,0 +1,24 @@
+# The template conformance suite (.github/scripts/conformance.py, managed by the platform): the built
+# image does what every agent repo must. A run is started with a token like a product's caller
+# would hold; the model answers from the suite's stand-in.
+image: "ci"  # the tag CI builds
+command: "uv run agent"  # conformance.py local: the app as a process
+port: 8080
+env:
+  AGENT_GATEWAY_URL: "{model}"
+  AGENT_GATEWAY_KEY: conformance
+  AGENT_OIDC_ISSUER: "{issuer}"
+  AGENT_OIDC_AUDIENCE: "{audience}"
+  AGENT_OIDC_JWKS_URL: "{jwks}"
+  AGENT_FLAGS_URL: "{ofrep}"
+  AGENT_PRODUCT: conformance
+  AGENT_ENVIRONMENT: ci
+  AGENT_AUDIT_SINK: log
+model_reply: "Triaged: routine referral."
+steps:
+  - method: POST
+    path: /runs
+    token: {scope: "agent:run agent:review", organization: {acme: {}}}
+    json: {task: {type: referral, text: "Knee pain for three weeks."}}
+    expect: [200, 202]
+checks: [audit, tracing, events, flags]
