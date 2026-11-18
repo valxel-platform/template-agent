@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.valxel.dev/audit/valxel.audit.v1.schema.json",
+  "x-version": "1.0.0",
+  "title": "valxel.audit.v1",
+  "description": "One audit record: a CloudEvent naming who did what to which records and how it turned out. Ids only, never field values. The audit sink (valxel-shared-services/ss-audit-sink) owns this file; producers keep a byte-identical copy at contracts/audit/valxel.audit.v1.schema.json and test the events they build against it. A change that a producer could fail is a new major version and a new event type.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "data"
+  ],
+  "properties": {
+    "specversion": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "type": {
+      "const": "valxel.audit.v1"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "subject": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "datacontenttype": {
+      "const": "application/json"
+    },
+    "data": {
+      "$ref": "#/$defs/data"
+    }
+  },
+  "$defs": {
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "action",
+        "actor",
+        "resource",
+        "outcome"
+      ],
+      "properties": {
+        "product": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "environment": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "data_class": {
+          "enum": [
+            "general",
+            "payments",
+            "phi"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "type": {
+              "enum": [
+                "user",
+                "service",
+                "agent"
+              ]
+            },
+            "client": {
+              "type": "string",
+              "maxLength": 300
+            }
+          }
+        },
+        "on_behalf_of": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "resource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "maxItems": 1000
+            }
+          }
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "denied",
+            "failure"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "trace_id": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{32})?$"
+        },
+        "span_id": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{16})?$"
+        },
+        "details": {
+          "description": "Counts, codes and ids, never field values.",
+          "type": "object"
+        }
+      }
+    }
+  }
+}

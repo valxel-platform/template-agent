@@ -31,7 +31,14 @@ dependencies = [
 agent = "agent.api:main"
 
 [dependency-groups]
-dev = ["pytest>=9.2", "pytest-cov>=7.1", "ruff>=0.17", "mypy>=2.4"]
+dev = [
+    "pytest>=9.2",
+    "pytest-cov>=7.1",
+    "ruff>=0.17",
+    "mypy>=2.4",
+    "jsonschema>=4.26.0",
+    "types-jsonschema>=4.26.0.20261006",
+]
 
 [build-system]
 requires = ["hatchling>=1.33.0"]
