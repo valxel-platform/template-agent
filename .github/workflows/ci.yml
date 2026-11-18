@@ -139,7 +139,7 @@ jobs:
           docker rm -f smoke
           python3 -m venv /tmp/conformance
           /tmp/conformance/bin/pip install -q pyyaml==6.0.3 jsonschema==4.25.1 "pyjwt[crypto]==2.10.1"
-          /tmp/conformance/bin/python .github/scripts/conformance.py --image ci
+          /tmp/conformance/bin/python .github/scripts/conformance.py image
       - name: Software bill of materials
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.57.1 \

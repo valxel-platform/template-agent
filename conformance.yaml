@@ -1,6 +1,8 @@
 # The template conformance suite (.github/scripts/conformance.py, managed by the platform): the built
 # image does what every agent repo must. A run is started with a token like a product's caller
 # would hold; the model answers from the suite's stand-in.
+image: "ci"  # the tag CI builds
+command: "uv run agent"  # conformance.py local: the app as a process
 port: 8080
 env:
   AGENT_GATEWAY_URL: "{model}"

@@ -2,8 +2,8 @@
 template contract says every repo of its role does (valxel-platform/agentic-sdlc,
 config/template-contract.yaml; tracker T-14). The platform manages this file; don't edit it here.
 
-    python .github/scripts/conformance.py --image ci          the image CI just built
-    python .github/scripts/conformance.py --cmd "uv run app"  the app as a process, for local work
+    python .github/scripts/conformance.py image   the image CI just built (conformance.yaml's `image`)
+    python .github/scripts/conformance.py local   the app as a process (its `command`), for local work
 
 The repo's own `conformance.yaml` says how to start it and what to do to it; this script stands up
 the services around it on 127.0.0.1 (the image runs with --network host), runs the steps, then checks
@@ -23,8 +23,8 @@ app answers when it's up and where its metrics are. In conformance.yaml, env val
 | "json:<field>"}).
 
 A repo whose app needs a database or Kafka to start says so (`postgres: <image>`, `kafka: <image>`):
-with --image they run as containers too, and {postgres} and {kafka} name them; with --cmd, pass
---postgres and --kafka instead.
+with `image` they run as containers too, and {postgres} and {kafka} name them; with `local`, set
+CONFORMANCE_POSTGRES and CONFORMANCE_KAFKA instead.
 
 Needs pyyaml, jsonschema and pyjwt[crypto]; exits 1 naming every check that failed.
 """
@@ -32,20 +32,21 @@ Needs pyyaml, jsonschema and pyjwt[crypto]; exits 1 naming every check that fail
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import secrets
 import shlex
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 AUDIENCE = "conformance"
 
@@ -209,19 +210,19 @@ class App:
 
     def logs(self) -> str:
         if self.image:
-            r = subprocess.run(["docker", "logs", self.name], capture_output=True, text=True)
+            r = subprocess.run(["docker", "logs", self.name], capture_output=True, text=True, check=False)
             return r.stdout + r.stderr
         return self.log.read_text(errors="replace")
 
     def running(self) -> bool:
         if self.image:
-            r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", self.name], capture_output=True, text=True)
+            r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", self.name], capture_output=True, text=True, check=False)
             return r.stdout.strip() == "true"
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self) -> None:
         if self.image:
-            subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", self.name], capture_output=True, check=False)
         elif self.proc is not None:
             self.proc.terminate()
             try:
@@ -232,16 +233,21 @@ class App:
 
 def _http(method: str, url: str, body: Any = None, headers: dict[str, str] | None = None,
           ) -> tuple[int, str, dict[str, str]]:
+    """A request to the app under test: http to this machine only."""
+    u = urlsplit(url)
+    if u.scheme != "http" or u.hostname not in ("127.0.0.1", "localhost"):
+        return 0, f"the suite only calls the app on this machine, not {u.scheme}://{u.hostname}", {}
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        **({"content-type": "application/json"} if data else {}), **(headers or {})})
+    conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=30)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace"), {k.lower(): v for k, v in resp.headers.items()}
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace"), {k.lower(): v for k, v in exc.headers.items()}
-    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        conn.request(method, (u.path or "/") + (f"?{u.query}" if u.query else ""), body=data, headers={
+            **({"content-type": "application/json"} if data else {}), **(headers or {})})
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8", "replace"), {k.lower(): v for k, v in resp.getheaders()}
+    except (OSError, http.client.HTTPException) as exc:
         return 0, str(exc), {}
+    finally:
+        conn.close()
 
 
 def _saved(how: str, text: str, headers: dict[str, str]) -> str:
@@ -332,12 +338,13 @@ def _backing(spec: dict, *, image: str, postgres: str, kafka: str) -> tuple[dict
             names["postgres"] = postgres
         elif image:
             name = f"conformance-pg-{uuid.uuid4().hex[:6]}"
-            subprocess.run(["docker", "run", "-d", "--name", name, "--network", "host", "-e", "POSTGRES_PASSWORD=conformance",
+            password = secrets.token_hex(16)  # this run's only, for a database that lives as long as it
+            subprocess.run(["docker", "run", "-d", "--name", name, "--network", "host", "-e", f"POSTGRES_PASSWORD={password}",
                             "-e", f"PGPORT={PG_PORT}", spec["postgres"]], check=True, capture_output=True)
             started.append(name)
-            names["postgres"] = f"postgresql://postgres:conformance@127.0.0.1:{PG_PORT}/postgres"
+            names["postgres"] = f"postgresql://postgres:{password}@127.0.0.1:{PG_PORT}/postgres"
             for _ in range(60):
-                if subprocess.run(["docker", "exec", name, "pg_isready", "-p", str(PG_PORT)], capture_output=True).returncode == 0:
+                if subprocess.run(["docker", "exec", name, "pg_isready", "-p", str(PG_PORT)], capture_output=True, check=False).returncode == 0:
                     break
                 time.sleep(1)
     if spec.get("kafka"):
@@ -410,7 +417,7 @@ def run(spec: dict, *, image: str = "", cmd: str = "", postgres: str = "", kafka
         app.stop()
         svc.stop()
         for name in containers:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
     if problems:
         print("\n--- the app's output (last 80 lines) ---\n" + "\n".join(logs.splitlines()[-80:]))
     return problems
@@ -420,16 +427,15 @@ def main(argv: list[str] | None = None) -> int:
     import yaml
 
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--image", default="")
-    p.add_argument("--cmd", default="")
-    p.add_argument("--spec", default="conformance.yaml")
-    p.add_argument("--postgres", default="", help="with --cmd: a database URL for {postgres}")
-    p.add_argument("--kafka", default="", help="with --cmd: Kafka's bootstrap servers for {kafka}")
+    p.add_argument("how", choices=["image", "local"], help="the built image, or the app as a local process")
     a = p.parse_args(argv)
-    if bool(a.image) == bool(a.cmd):
-        p.error("give --image or --cmd")
-    spec = yaml.safe_load(Path(a.spec).read_text(encoding="utf-8"))
-    problems = run(spec, image=a.image, cmd=a.cmd, postgres=a.postgres, kafka=a.kafka)
+    # Everything else comes from the repo's own file, never from the command line.
+    spec = yaml.safe_load(Path("conformance.yaml").read_text(encoding="utf-8"))
+    if a.how == "image":
+        problems = run(spec, image=str(spec.get("image") or "ci"))
+    else:
+        problems = run(spec, cmd=str(spec["command"]), postgres=os.environ.get("CONFORMANCE_POSTGRES", ""),
+                       kafka=os.environ.get("CONFORMANCE_KAFKA", ""))
     for x in problems:
         print(f"FAILED {x}")
     print("conformance: " + ("passed" if not problems else f"{len(problems)} problems"))
