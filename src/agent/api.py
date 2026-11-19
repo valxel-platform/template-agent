@@ -25,15 +25,15 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from langgraph.types import Command
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import chat, cohorts, delegation, errors, events, flags, locks, telemetry, usage
-from .audit import Auditor, AuditUnavailable, make_sink
+from . import chat, cohorts, delegation, errors, events, flags, locks, memory, telemetry, usage
+from .audit import Actor, Auditor, AuditUnavailable, make_sink
 from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
 from .locks import Lease, LeaseLost, Locks, MemoryLocks, PostgresLocks
@@ -357,6 +357,28 @@ class Database:
         self.conversations = PostgresConversations(self.pool)
 
 
+def make_memory(settings: Settings, db: Database) -> memory.Memory | None:
+    """Long-term memory when AGENT_MEMORY is on: in the run database, or in memory without one."""
+    if not settings.memory:
+        return None
+    kept: memory.Memory
+    if db.pool is None:
+        kept = memory.InMemory(settings.memory_retention_days, settings.memory_max_per_person)
+    else:
+        kept = memory.PostgresMemory(db.pool, settings.memory_retention_days, settings.memory_max_per_person)
+
+    def loop() -> None:
+        while True:
+            time.sleep(3600)
+            try:
+                kept.prune()
+            except Exception:
+                log.exception("pruning memories failed")
+
+    threading.Thread(target=loop, name="memory-prune", daemon=True).start()
+    return kept
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -393,8 +415,11 @@ def create_app(
         "agent": settings.name,
         "emit": db.progress.emit,
     }
+    remembered = make_memory(settings, db)
     graph = build_graph(**common)
-    conversation = build_graph(**common, mode="conversation", history_turns=settings.chat_history_turns)
+    conversation = build_graph(
+        **common, mode="conversation", history_turns=settings.chat_history_turns, memory=remembered
+    )
     runner = Runner(
         graph, settings.max_steps, name=settings.name, chat=conversation, locks=db.locks, progress=db.progress
     )
@@ -525,6 +550,41 @@ def create_app(
         return runner.view(run_id)
 
     chat.routes(app, runner, db.conversations, tools, settings, can_run, synchronous)
+
+    @app.get("/memories")
+    def my_memories(claims: dict[str, Any] = can_run) -> dict[str, Any]:
+        """What the agent keeps for you in this tenant (empty when memory is off)."""
+        if remembered is None:
+            return {"memories": [], "enabled": False}
+        who, scope = str(claims.get("sub", "")), memory.scope_of(tenants(claims, settings.tenant_claim))
+        return {
+            "memories": remembered.mine(who, scope),
+            "enabled": True,
+            "retention_days": settings.memory_retention_days,
+        }
+
+    @app.delete("/memories/{memory_id}", status_code=204)
+    def forget_one(memory_id: str, claims: dict[str, Any] = can_run) -> Response:
+        who, scope = str(claims.get("sub", "")), memory.scope_of(tenants(claims, settings.tenant_claim))
+        if remembered is None or not remembered.forget(who, scope, memory_id):
+            raise HTTPException(404, "No such memory")
+        auditor.record(
+            "agent.memory.forget", actor=Actor(id=who, type="user"), resource=("memory", [memory_id])
+        )
+        return Response(status_code=204)
+
+    @app.delete("/memories")
+    def forget_all(claims: dict[str, Any] = can_run) -> dict[str, Any]:
+        who, scope = str(claims.get("sub", "")), memory.scope_of(tenants(claims, settings.tenant_claim))
+        n = remembered.forget(who, scope) if remembered is not None else 0
+        if n:
+            auditor.record(
+                "agent.memory.forget",
+                actor=Actor(id=who, type="user"),
+                resource=("memory", ["*"]),
+                details={"count": n},
+            )
+        return {"forgotten": n}
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

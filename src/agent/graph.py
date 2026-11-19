@@ -40,6 +40,7 @@ from langgraph.types import Command, interrupt
 from opentelemetry import trace as otel
 
 from . import locks, untrusted
+from . import memory as long_term
 from .audit import Actor, Auditor, MemorySink
 from .model import Model
 from .tools import Tool, ToolError, ToolHost
@@ -157,9 +158,11 @@ def build_graph(
     history_turns: int = 20,
     variants: dict[str, Variant] | None = None,
     variant: str | None = None,
+    memory: long_term.Memory | None = None,
 ) -> Any:
     """`variants`: the reviewed prompt and model variants (variants.toml); `variant` forces one for
-    every run (the evals), else Flipt picks per run."""
+    every run (the evals), else Flipt picks per run. `memory` (memory.py) gives a conversation's
+    person the remember and recall tools."""
     audit = auditor or Auditor(MemorySink(), service=agent)
     me = Actor(id=agent, type="agent")
     known_variants = variants if variants is not None else load_variants()
@@ -227,6 +230,38 @@ def build_graph(
 
     def requester(state: RunState) -> str:
         return str((state.get("task") or {}).get("requested_by") or "")
+
+    def remembers(state: RunState) -> bool:
+        """Long-term memory is a person's, in a conversation: never an event's run."""
+        return memory is not None and mode == "conversation" and bool(requester(state))
+
+    def use_memory(state: RunState, c: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        assert memory is not None
+        who, scope = requester(state), long_term.scope_of((state.get("task") or {}).get("tenants"))
+        args = c.get("input") or {}
+        try:
+            if c["name"] == "remember":
+                kept = memory.remember(who, scope, str(args.get("fact") or ""), source=state["run_id"])
+                audit.record(
+                    "agent.memory.remember",
+                    actor=Actor(id=who, type="user"),
+                    resource=("memory", [kept["id"]]),
+                    details={"chars": len(kept["fact"])},
+                )
+                say(state["run_id"], "step", tool="remember", title="Remembered", ok=True)
+                out = _tool_result(c["id"], f"Remembered: {kept['fact']}")
+            else:
+                found = memory.recall(who, scope, str(args.get("query") or ""))
+                body = (
+                    "\n".join(f"- {m['fact']} ({m['created_at'][:10]})" for m in found)
+                    or "Nothing remembered."
+                )
+                say(state["run_id"], "step", tool="recall", title="Recalled", ok=True)
+                # What people wrote earlier is outside text, like any tool's answer.
+                out = _tool_result(c["id"], body, source="memory")
+            return out, _event("tool_call", tool=c["name"], ok=True)
+        except ValueError as exc:
+            return _tool_result(c["id"], str(exc), error=True), _event("tool_call", tool=c["name"], ok=False)
 
     def run_reads(
         run_id: str, calls: list[dict[str, Any]], known: dict[str, Tool]
@@ -304,7 +339,8 @@ def build_graph(
             messages=window(state["messages"], history_turns)
             if mode == "conversation"
             else state["messages"],
-            tools=[t.definition() for t in known.values()],
+            tools=[t.definition() for t in known.values()]
+            + ([long_term.REMEMBER, long_term.RECALL] if remembers(state) else []),
             labels={"run": state["run_id"], "variant": v.name},
             **({"model": v.model} if v.model else {}),
         )
@@ -322,7 +358,11 @@ def build_graph(
             )
         ]
         calls = [b for b in content if b.get("type") == "tool_use"]
-        unknown = [c for c in calls if c["name"] not in known]
+        mem = [
+            c for c in calls if c["name"] in long_term.TOOLS and c["name"] not in known and remembers(state)
+        ]
+        calls_left = [c for c in calls if c not in mem]
+        unknown = [c for c in calls_left if c["name"] not in known]
         reads = [c for c in calls if c["name"] in known and known[c["name"]].read_only]
         writes = [c for c in calls if c["name"] in known and not known[c["name"]].read_only]
         base = {"steps": steps + 1, "messages": [assistant]}
@@ -334,6 +374,10 @@ def build_graph(
                 update={**base, "status": "done", "result": text, "trace": [*trace, _event("done")]},
             )
         results, read_trace = run_reads(state["run_id"], reads, known)
+        for c in mem:
+            out, ev = use_memory(state, c)
+            results.append(out)
+            read_trace.append(ev)
         results += [
             _tool_result(c["id"], f"Tool {c['name']} is not available to this agent.", error=True)
             for c in unknown
