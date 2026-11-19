@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     chat_history_turns: int = 20
     chat_max_chars: int = 8000
     progress_retention_s: float = 86400.0
+    # Long-term memory (memory.py): off unless set. A conversation's person may ask the agent to
+    # remember things across conversations, kept per person and tenant, for this many days.
+    memory: bool = False
+    memory_retention_days: float = 90.0
+    memory_max_per_person: int = 200
     # Who may start runs and decide approvals: OAuth 2.0 bearer tokens from the product's IdP.
     oidc_issuer: str = ""
     oidc_audience: str = ""

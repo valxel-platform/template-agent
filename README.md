@@ -77,6 +77,26 @@ asked for them, and the changes run with their token); work that needs someone e
 goes through runs. People reach conversations through the product's BFF, which relays their
 token and passes the stream through.
 
+Long-term memory (`AGENT_MEMORY=true`; off by default, `src/agent/memory.py`):
+
+```
+GET    /memories          what the agent keeps for you in this tenant, newest first
+DELETE /memories/{id}     forget one
+DELETE /memories          forget all of yours in this tenant
+```
+
+With memory on, a conversation's model gets two built-in tools: `remember` (keep something the
+person asked it to, at most 500 characters) and `recall` (look it up later, returned as untrusted
+text). Runs started by `/runs` or `/events` never get them. A memory belongs to one person in one
+tenant scope (the tenants their token names): row-level security on `agent_memories` keeps
+everyone else's rows out of every statement, and it is forced on the table's owner, so connect
+as an ordinary role (not a superuser or a `BYPASSRLS` role). Memories expire after
+`AGENT_MEMORY_RETENTION_DAYS`, are pruned hourly, and each person keeps at most
+`AGENT_MEMORY_MAX_PER_PERSON` (oldest dropped). Remembering and forgetting are audited
+(`agent.memory.remember`, `agent.memory.forget`) with ids and lengths, never the text. Memories
+hold what people wrote, so they share the conversations' data class and database: turn memory on
+only where the product's design says what may be kept and for how long.
+
 ## Product events
 
 When the HLD's Instrumentation section names this agent as the one that records an event, record
@@ -206,6 +226,8 @@ uv run agent
 | `AGENT_DATABASE_POOL` | `10` | Connections per replica; each thread executing on the replica holds one more (up to 8), plus one for notifications. Keep replicas x (pool + 9) under the database's connection limit |
 | `AGENT_CHAT_HISTORY_TURNS`, `AGENT_CHAT_MAX_CHARS` | `20`, `8000` | Exchanges the model sees; the longest message a person can send |
 | `AGENT_PROGRESS_RETENTION_S` | `86400` | How long streamed progress is kept |
+| `AGENT_MEMORY` | `false` | Long-term memory per person and tenant (see API) |
+| `AGENT_MEMORY_RETENTION_DAYS`, `AGENT_MEMORY_MAX_PER_PERSON` | `90`, `200` | How long a memory is kept; how many each person keeps |
 | `AGENT_OIDC_ISSUER`, `AGENT_OIDC_AUDIENCE`, `AGENT_OIDC_JWKS_URL` | | Required |
 | `AGENT_RUN_SCOPE`, `AGENT_REVIEW_SCOPE` | `agent:run`, `agent:review` | |
 | `AGENT_FLAGS_URL` | | The product's Flipt; unset, every feature flag reads as off |
