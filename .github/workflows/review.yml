@@ -1,0 +1,26 @@
+# The independent review on every pull request (valxel-platform/agentic-sdlc,
+# .github/workflows/independent-review.yml; T-139). Runs from the base branch, so a pull request
+# can't change the review it gets. Pinned: Renovate proposes newer versions.
+name: review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions: {}
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  independent:
+    uses: valxel-platform/agentic-sdlc/.github/workflows/independent-review.yml@b2e10f700528680bf835eaf29e0ff84ff7a71042
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      # High risk beyond the defaults.
+      high_risk_paths: |
+        *tools*
+        *mcp*
+        *prompt*
