@@ -14,6 +14,11 @@ COPY README.md ./
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm@sha256:f0fa218d5b06f9b9235024fa061cde2cb141f726de52134471053d2d9b5324a3
+# libpam's CVE-2025-6020 fix (Debian 1.5.2-6+deb12u3) isn't in the upstream image yet: take it here
+# until Dependabot's next base-image bump includes it, then drop this line.
+RUN apt-get update && apt-get install -y --no-install-recommends --only-upgrade \
+        libpam0g libpam-modules libpam-modules-bin libpam-runtime \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --no-create-home app
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
