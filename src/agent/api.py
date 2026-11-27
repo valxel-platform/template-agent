@@ -32,7 +32,20 @@ from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import chat, cohorts, delegation, errors, events, flags, locks, management, memory, telemetry, usage
+from . import (
+    chat,
+    cohorts,
+    delegation,
+    errors,
+    events,
+    flags,
+    http_metrics,
+    locks,
+    management,
+    memory,
+    telemetry,
+    usage,
+)
 from .audit import Actor, Auditor, AuditUnavailable, make_sink
 from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
@@ -434,6 +447,8 @@ def create_app(
 
     app = FastAPI(title=settings.name, version="0.1.0", lifespan=lifespan)
     # Each response names its trace (traceresponse); errors go to Sentry when SENTRY_DSN is set.
+    # Requests, errors and latency per route, on the management port (http_metrics.py).
+    app.add_middleware(http_metrics.HttpMetrics, registry=runner.registry)
     app.add_middleware(errors.TraceResponseMiddleware)
     # Requests per flag, on and off, for the SDLC tool's gradual releases (logged once a minute).
     app.add_middleware(cohorts.CohortMiddleware)
