@@ -100,7 +100,7 @@ def test_run_review_and_finish(setup: tuple[TestClient, ScriptedModel], world: W
         == 409
     )
 
-    metrics = client.get("/metrics").text
+    metrics = client.app.state.metrics_body()[0].decode()  # the management port's
     assert "agent_runs_started_total 1.0" in metrics
     assert 'agent_decisions_total{decision="approve"} 1.0' in metrics
 

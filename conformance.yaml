@@ -3,6 +3,8 @@
 # would hold; the model answers from the suite's stand-in.
 image: "ci"  # the tag CI builds
 command: "uv run agent"  # conformance.py local: the app as a process
+# /metrics is on the management port (MANAGEMENT_PORT, 8081), apart from the API.
+metrics: http://127.0.0.1:8081/metrics
 port: 8080
 env:
   AGENT_GATEWAY_URL: "{model}"

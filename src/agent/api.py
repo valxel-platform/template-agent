@@ -5,7 +5,7 @@
   GET  /runs/{id}              status, result, what is waiting for review, and the trace
   POST /runs/{id}/decision     approve or reject proposed changes; resume or stop a stalled run
   /conversations ...           a person talking with the agent (chat.py)
-  GET  /healthz /readyz /metrics
+  GET  /healthz /readyz          (/metrics: the management port, 8081)
 
 Callers present OAuth 2.0 bearer tokens from the product's IdP. Starting runs needs the run
 scope; deciding needs the review scope, and the reviewer's identity is recorded in the trace.
@@ -25,14 +25,14 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import Response
 from langgraph.types import Command
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, generate_latest
 from pydantic import BaseModel, Field
 
-from . import chat, cohorts, delegation, errors, events, flags, locks, memory, telemetry, usage
+from . import chat, cohorts, delegation, errors, events, flags, locks, management, memory, telemetry, usage
 from .audit import Actor, Auditor, AuditUnavailable, make_sink
 from .chat import CONVERSATION
 from .graph import APPROVAL_DECISIONS, TAKEOVER_DECISIONS, build_graph
@@ -598,9 +598,9 @@ def create_app(
             raise HTTPException(503, f"MCP servers unreachable: {type(exc).__name__}") from exc
         return {"status": "ready", "tools": n}
 
-    @app.get("/metrics")
-    def metrics(request: Request) -> PlainTextResponse:
-        return PlainTextResponse(generate_latest(runner.registry), media_type=CONTENT_TYPE_LATEST)
+    # What the management port serves (management.py, started in main): runs, decisions, requests
+    # by route and client, and the product events counter. The API port serves no metrics.
+    app.state.metrics_body = lambda: (generate_latest(runner.registry), CONTENT_TYPE_LATEST)
 
     return app
 
@@ -610,4 +610,8 @@ def main() -> None:
 
     settings = Settings()
     telemetry.setup_logging(settings.name)
-    uvicorn.run(create_app(settings), host="0.0.0.0", port=8080, log_config=None)  # noqa: S104  (inside the container)
+    app = create_app(settings)
+    # /metrics on the management port (MANAGEMENT_PORT, 8081), apart from the API, as in the Java
+    # templates: the mesh lets the data plane's metrics collector reach that port only.
+    management.serve(app.state.metrics_body)
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)  # noqa: S104  (inside the container)
