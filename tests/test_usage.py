@@ -83,7 +83,8 @@ def test_each_request_counts_by_route_client_app_and_status(
     client.post("/runs", json={"task": {}}, headers={"Authorization": "Bearer no-scope"})  # 403
     client.post("/runs", json={"task": {}})  # no token: 401
     client.get("/healthz")
-    metrics = client.get("/metrics").text
+    assert client.get("/metrics").status_code == 404  # on the management port (8081) only
+    metrics = client.app.state.metrics_body()[0].decode()
     assert (
         sample(
             metrics,
